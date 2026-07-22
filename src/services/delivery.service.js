@@ -12,15 +12,7 @@ export const DELIVERY_UPLOADS_DIR = path.join(UPLOADS_ROOT, 'deliveries');
 const ALLOWED_TYPES = new Set(['city_to_city', 'country_to_country']);
 const ALLOWED_CATEGORIES = new Set(['documents', 'objects']);
 const ALLOWED_SIZES = new Set(['envelope', 'small box', 'medium box', 'large bag']);
-const ALLOWED_MEETUPS = new Set([
-  'Airport',
-  'Coffee Shop',
-  'Shopping Mall',
-  'Bus Station',
-  'Train Station',
-  'Hotel Lobby',
-]);
-
+const MAX_MEETUP_LABEL_LENGTH = 240;
 const DEFAULT_PLATFORM_FEE = 5.0;
 const DEFAULT_PLATFORM_FEE_SHARE = 2.5;
 
@@ -194,8 +186,12 @@ function validatePayload(body, files) {
     throw new AppError('Select up to 4 preferred meetup locations', 400, 'VALIDATION_ERROR');
   }
   for (const loc of preferredMeetupLocations) {
-    if (!ALLOWED_MEETUPS.has(loc)) {
-      throw new AppError(`Invalid meetup location: ${loc}`, 400, 'VALIDATION_ERROR');
+    if (loc.length > MAX_MEETUP_LABEL_LENGTH) {
+      throw new AppError(
+        `Meetup location is too long (max ${MAX_MEETUP_LABEL_LENGTH} characters)`,
+        400,
+        'VALIDATION_ERROR'
+      );
     }
   }
 

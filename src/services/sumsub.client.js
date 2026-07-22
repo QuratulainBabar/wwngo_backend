@@ -2,10 +2,7 @@ import crypto from 'crypto';
 import { env } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
 
-// TEMPORARILY DISABLED - SUMSUB KYC
-// Keep the client implementation and configuration intact, but prevent every
-// signed outbound request even if this module is imported directly.
-const SUMSUB_KYC_ENABLED = false;
+const SUMSUB_KYC_ENABLED = true;
 
 function assertConfigured() {
   if (!env.sumsub.appToken || !env.sumsub.secretKey) {

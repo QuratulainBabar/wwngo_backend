@@ -9,32 +9,6 @@ import {
 } from './sumsub.client.js';
 import { getUserProfile } from './auth.service.js';
 
-// TEMPORARILY DISABLED - SUMSUB KYC
-// Public service methods below are local placeholders. The original Sumsub
-// implementations remain in this file under *SumsubDisabled names.
-export async function issueAccessToken() {
-  throw new AppError(
-    'Identity verification is temporarily unavailable.',
-    503,
-    'KYC_DISABLED'
-  );
-}
-
-export async function getKycStatus(userId) {
-  const profile = await getUserProfile(userId);
-  return {
-    kycStatus: 'disabled',
-    reviewStatus: null,
-    applicantId: null,
-    synced: false,
-    user: profile,
-  };
-}
-
-export async function handleSumsubWebhook() {
-  return { accepted: true, disabled: true };
-}
-
 const USER_KYC_COLUMNS = `
   id, name, email, phone, country_code, bio, rating, review_count,
   wallet_balance, is_verified, kyc_status, account_status, created_at,
@@ -103,8 +77,7 @@ async function persistKycUpdate(userId, { kycStatus, applicantId, reviewStatus }
 /**
  * POST /kyc/access-token — temporary SDK token for the signed-in user.
  */
-// TEMPORARILY DISABLED - SUMSUB KYC
-async function issueAccessTokenSumsubDisabled(userId) {
+export async function issueAccessToken(userId) {
   const user = await findUserRow(userId);
   if (!user) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -148,8 +121,7 @@ async function issueAccessTokenSumsubDisabled(userId) {
 /**
  * GET /kyc/status — sync from Sumsub when possible, then return local profile status.
  */
-// TEMPORARILY DISABLED - SUMSUB KYC
-async function getKycStatusSumsubDisabled(userId, { sync = true } = {}) {
+export async function getKycStatus(userId, { sync = true } = {}) {
   const user = await findUserRow(userId);
   if (!user) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -173,7 +145,6 @@ async function getKycStatusSumsubDisabled(userId, { sync = true } = {}) {
     } catch (err) {
       // Applicant may not exist yet (user has not opened SDK). Keep local status.
       if (err.code !== 'SUMSUB_API_ERROR' && err.status !== 404) {
-        // Non-404 Sumsub errors should surface for debugging when sync is critical.
         if (err.status && err.status >= 500) throw err;
       }
     }
@@ -192,8 +163,7 @@ async function getKycStatusSumsubDisabled(userId, { sync = true } = {}) {
 /**
  * Webhook handler — source of truth for final KYC decisions.
  */
-// TEMPORARILY DISABLED - SUMSUB KYC
-async function handleSumsubWebhookSumsubDisabled({
+export async function handleSumsubWebhook({
   rawBody,
   digestHeader,
   digestAlgHeader,

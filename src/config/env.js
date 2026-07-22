@@ -12,6 +12,8 @@ for (const key of required) {
 
 export const env = {
   port: Number(process.env.PORT) || 3000,
+  /** Bind address — use 0.0.0.0 so phones on the LAN can reach the API. */
+  host: cleanEnv(process.env.HOST) || '0.0.0.0',
   nodeEnv: process.env.NODE_ENV || 'development',
   isDev: (process.env.NODE_ENV || 'development') !== 'production',
   databaseUrl: process.env.DATABASE_URL,
@@ -36,11 +38,12 @@ export const env = {
     lockoutMinutes: Number(process.env.LOCKOUT_MINUTES) || 15,
   },
   corsOrigins: process.env.CORS_ORIGINS?.split(',').map((o) => o.trim()) || ['*'],
-  // TEMPORARILY DISABLED - SUMSUB KYC
-  // Configuration is retained for future restoration but has no active caller.
+  /** Google Maps / Places API key (server-side proxy for Flutter). */
+  googleMapsApiKey: cleanEnv(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_PLACES_API_KEY),
   sumsub: {
-    appToken: cleanEnv(process.env.SUMSUB_APP_TOKEN),
-    secretKey: cleanEnv(process.env.SUMSUB_SECRET_KEY),
+    // Prefer canonical names; accept legacy SUMSUB_TOKEN / SUMSUB_SECRET aliases.
+    appToken: cleanEnv(process.env.SUMSUB_APP_TOKEN || process.env.SUMSUB_TOKEN),
+    secretKey: cleanEnv(process.env.SUMSUB_SECRET_KEY || process.env.SUMSUB_SECRET),
     /** Must match a verification level name configured in the Sumsub dashboard (Sandbox). */
     levelName: cleanEnv(process.env.SUMSUB_LEVEL_NAME) || 'basic-kyc-level',
     /**
@@ -52,7 +55,9 @@ export const env = {
       ''
     ),
     tokenTtlSecs: Number(process.env.SUMSUB_TOKEN_TTL_SECS) || 600,
-    webhookSecret: cleanEnv(process.env.SUMSUB_WEBHOOK_SECRET) || cleanEnv(process.env.SUMSUB_SECRET_KEY),
+    webhookSecret:
+      cleanEnv(process.env.SUMSUB_WEBHOOK_SECRET) ||
+      cleanEnv(process.env.SUMSUB_SECRET_KEY || process.env.SUMSUB_SECRET),
     get sandbox() {
       return this.appToken.startsWith('sbx:');
     },
