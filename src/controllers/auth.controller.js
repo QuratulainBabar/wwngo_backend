@@ -54,6 +54,19 @@ export const loginValidators = [
   body('password').notEmpty().withMessage('Password is required'),
 ];
 
+export const passwordLoginOtpSendValidators = [
+  body('email').isEmail().withMessage('Enter a valid email address'),
+  body('password').notEmpty().withMessage('Password is required'),
+];
+
+export const passwordLoginOtpVerifyValidators = [
+  body('email').isEmail().withMessage('Enter a valid email address'),
+  body('password').notEmpty().withMessage('Password is required'),
+  body('code')
+    .isLength({ min: 6, max: 6 })
+    .withMessage('Enter the 6-digit code'),
+];
+
 export const forgotPasswordValidators = [
   body('contact').trim().notEmpty().withMessage('Contact is required'),
   body('method')
@@ -224,6 +237,16 @@ export const sendLoginOtp = asyncHandler(async (req, res) => {
 
 export const verifyLoginOtp = asyncHandler(async (req, res) => {
   const result = await authService.verifyLoginOtp(req.body);
+  res.json({ success: true, data: result });
+});
+
+export const sendPasswordLoginOtp = asyncHandler(async (req, res) => {
+  const result = await authService.sendPasswordLoginOtp(req.body);
+  res.json({ success: true, data: result });
+});
+
+export const completePasswordLoginOtp = asyncHandler(async (req, res) => {
+  const result = await authService.completePasswordLoginOtp(req.body);
   res.json({ success: true, data: result });
 });
 

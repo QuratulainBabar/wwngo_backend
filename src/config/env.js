@@ -27,11 +27,31 @@ export const env = {
   },
   otp: {
     expiresMinutes: Number(process.env.OTP_EXPIRES_MINUTES) || 5,
-    length: Number(process.env.OTP_LENGTH) || 6,
+    /** Fixed at 6 — must match Flutter OtpCodeField length. */
+    length: 6,
     maxSendsPerWindow: Number(process.env.OTP_MAX_SENDS) || 3,
     sendWindowMinutes: Number(process.env.OTP_SEND_WINDOW_MINUTES) || 15,
-    /** Fixed demo OTP for email verification (no real email sent). */
-    demoCode: process.env.DEMO_OTP_CODE || '123456',
+  },
+  smtp: {
+    host: cleanEnv(process.env.SMTP_HOST) || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT) || 587,
+    user: cleanEnv(process.env.SMTP_USER || process.env.GMAIL_USER),
+    pass: cleanEnv(process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD),
+    from:
+      cleanEnv(process.env.SMTP_FROM) ||
+      cleanEnv(process.env.SMTP_USER || process.env.GMAIL_USER) ||
+      'WWNGO <noreply@wwngo.app>',
+    /**
+     * Antivirus / corporate proxies often inject a self-signed cert into the
+     * SMTP TLS chain. Default: skip verify in development; enforce in production
+     * unless SMTP_TLS_REJECT_UNAUTHORIZED=false.
+     */
+    tlsRejectUnauthorized: (() => {
+      const raw = cleanEnv(process.env.SMTP_TLS_REJECT_UNAUTHORIZED);
+      if (raw === 'true') return true;
+      if (raw === 'false') return false;
+      return (process.env.NODE_ENV || 'development') === 'production';
+    })(),
   },
   security: {
     maxFailedLogins: Number(process.env.MAX_FAILED_LOGINS) || 5,

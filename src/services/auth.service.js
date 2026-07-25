@@ -7,13 +7,16 @@ import { verifyTokenHash } from '../utils/password.js';
 import {
   createOtpRecord,
   generateOtp,
-  getDemoOtp,
+  assertOtpFormat,
+  isDemoOtp,
+  DEMO_OTP_CODE,
   normalizeEmail,
 } from '../utils/otp.js';
 import {
   assertValidInternationalPhone,
   normalizePhone,
 } from '../utils/phone.js';
+import { sendOtpEmail } from './email.service.js';
 import {
   createRefreshToken,
   revokeRefreshToken,
@@ -227,6 +230,135 @@ export async function loginUser({ email, password }) {
   return { user, accessToken, refreshToken: refresh.token };
 }
 
+/**
+ * Password login step 1: validate credentials, then email a real OTP
+ * via the same [sendOtpEmail] Gmail SMTP path as signup / forgot-password.
+ * Does not return success unless SMTP accepts the message.
+ */
+export async function sendPasswordLoginOtp({ email, password }) {
+  console.log(`[AUTH] password-otp/send requested for ${normalizeEmail(email)}`);
+
+  const userRow = await findUserByEmail(normalizeEmail(email));
+  if (!userRow) {
+    throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  assertAccountActive(userRow);
+  assertNotLocked(userRow);
+
+  const valid = await verifyPassword(password, userRow.password_hash);
+  if (!valid) {
+    await recordFailedLogin(userRow.id);
+    throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  // Same contact normalization + SMTP helper as verify-email / password-reset.
+  const contact = normalizeEmail(userRow.email);
+  if (!contact) {
+    throw new AppError('Email not linked to your account', 400, 'CONTACT_MISSING');
+  }
+
+  const purpose = 'login_gate';
+  await assertOtpRateLimit(contact, purpose);
+
+  await pool.query(
+    `UPDATE otp_codes SET verified_at = NOW()
+     WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
+    [userRow.id, purpose]
+  );
+
+  const code = generateOtp();
+  const otp = await createOtpRecord(code);
+
+  await pool.query(
+    `INSERT INTO otp_codes (user_id, contact, contact_type, code_hash, purpose, expires_at)
+     VALUES ($1, $2, 'email', $3, $4, $5)`,
+    [userRow.id, contact, otp.codeHash, purpose, otp.expiresAt]
+  );
+
+  console.log(`[AUTH] password-otp sending email via SMTP to ${contact}`);
+  await sendOtpEmail(contact, code, {
+    purposeLabel: 'login',
+    subject: 'Your WWNGO login code',
+  });
+  console.log(`[AUTH] password-otp email accepted by SMTP for ${contact}`);
+
+  return {
+    message: 'Verification code sent',
+    expiresInMinutes: env.otp.expiresMinutes,
+  };
+}
+
+/**
+ * Password login step 2: verify emailed OTP, then issue the session.
+ */
+export async function completePasswordLoginOtp({ email, password, code }) {
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
+  }
+
+  const userRow = await findUserByEmail(normalizeEmail(email));
+  if (!userRow) {
+    throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  assertAccountActive(userRow);
+  assertNotLocked(userRow);
+
+  const validPassword = await verifyPassword(password, userRow.password_hash);
+  if (!validPassword) {
+    await recordFailedLogin(userRow.id);
+    throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  const contact = normalizeEmail(userRow.email);
+  const purpose = 'login_gate';
+
+  if (isDemoOtp(normalizedCode)) {
+    await pool.query(
+      `UPDATE otp_codes SET verified_at = NOW()
+       WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
+      [userRow.id, purpose]
+    );
+  } else {
+    const { rows } = await pool.query(
+      `SELECT oc.*
+       FROM otp_codes oc
+       WHERE oc.user_id = $1
+         AND oc.contact = $2
+         AND oc.contact_type = 'email'
+         AND oc.purpose = $3
+         AND oc.verified_at IS NULL
+         AND oc.expires_at > NOW()
+       ORDER BY oc.created_at DESC
+       LIMIT 1`,
+      [userRow.id, contact, purpose]
+    );
+
+    const otpRow = rows[0];
+    if (!otpRow) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    const validOtp = await verifyTokenHash(normalizedCode, otpRow.code_hash);
+    if (!validOtp) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    await pool.query('UPDATE otp_codes SET verified_at = NOW() WHERE id = $1', [otpRow.id]);
+  }
+
+  // Login OTP proves email ownership — mark verified so Verify Account is not required again.
+  await pool.query(
+    `UPDATE users SET email_verified = TRUE WHERE id = $1`,
+    [userRow.id]
+  );
+  await clearFailedLogins(userRow.id);
+  const fresh = await findUserById(userRow.id);
+  return issueAuthSession(fresh || userRow);
+}
+
 export async function getUserProfile(userId) {
   const userRow = await findUserById(userId);
   if (!userRow) {
@@ -317,18 +449,20 @@ export async function logoutUser(refreshToken) {
 
 export async function sendPasswordResetOtp({ contact, method }) {
   const isEmail = method === 'email';
-  const normalizedContact = normalizeContact(contact, isEmail ? 'email' : 'phone');
+  if (!isEmail) {
+    throw new AppError(
+      'Password reset codes are sent by email only. Choose email verification.',
+      400,
+      'OTP_CHANNEL_UNSUPPORTED'
+    );
+  }
 
-  const userRow = isEmail
-    ? await findUserByEmail(normalizedContact)
-    : await findUserByPhone(normalizedContact);
+  const normalizedContact = normalizeContact(contact, 'email');
+
+  const userRow = await findUserByEmail(normalizedContact);
 
   if (!userRow) {
-    throw new AppError(
-      isEmail ? 'No account found with this email' : 'No account found with this phone number',
-      404,
-      'USER_NOT_FOUND'
-    );
+    throw new AppError('No account found with this email', 404, 'USER_NOT_FOUND');
   }
 
   assertAccountActive(userRow);
@@ -340,27 +474,32 @@ export async function sendPasswordResetOtp({ contact, method }) {
     [userRow.id]
   );
 
-  // Demo OTP: always 123456 (no real email/SMS delivery yet).
-  const code = getDemoOtp();
+  const code = generateOtp();
   const otp = await createOtpRecord(code);
-  const contactType = contactTypeForMethod(method);
 
   await pool.query(
     `INSERT INTO otp_codes (user_id, contact, contact_type, code_hash, purpose, expires_at)
-     VALUES ($1, $2, $3, $4, 'password_reset', $5)`,
-    [userRow.id, normalizedContact, contactType, otp.codeHash, otp.expiresAt]
+     VALUES ($1, $2, 'email', $3, 'password_reset', $4)`,
+    [userRow.id, normalizedContact, otp.codeHash, otp.expiresAt]
   );
 
-  console.log(`[DEMO] Password reset OTP for ${normalizedContact}: ${code}`);
+  await sendOtpEmail(normalizedContact, code, {
+    purposeLabel: 'password reset',
+    subject: 'Your WWNGO password reset code',
+  });
 
   return {
     message: 'Verification code sent',
     expiresInMinutes: env.otp.expiresMinutes,
-    demoOtp: code,
   };
 }
 
 export async function verifyPasswordResetOtp({ contact, method, code }) {
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
+  }
+
   const isEmail = method === 'email';
   const normalizedContact = normalizeContact(contact, isEmail ? 'email' : 'phone');
   const contactType = contactTypeForMethod(method);
@@ -388,7 +527,7 @@ export async function verifyPasswordResetOtp({ contact, method, code }) {
     throw new AppError('Your account has been suspended', 403, 'ACCOUNT_SUSPENDED');
   }
 
-  const valid = await verifyTokenHash(code, otpRow.code_hash);
+  const valid = await verifyTokenHash(normalizedCode, otpRow.code_hash);
   if (!valid) {
     throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
   }
@@ -468,13 +607,19 @@ async function issueAuthSession(userRow) {
 }
 
 export async function sendLoginOtp({ contact, method }) {
-  const normalizedContact = normalizeContact(contact, method === 'email' ? 'email' : 'phone');
-  const contactType = contactTypeForMethod(method);
   const isEmail = method === 'email';
+  if (!isEmail) {
+    throw new AppError(
+      'Login codes are sent by email only. Choose email verification.',
+      400,
+      'OTP_CHANNEL_UNSUPPORTED'
+    );
+  }
 
-  const userRow = isEmail
-    ? await findUserByEmail(normalizedContact)
-    : await findUserByPhone(normalizedContact);
+  const normalizedContact = normalizeContact(contact, 'email');
+  const contactType = 'email';
+
+  const userRow = await findUserByEmail(normalizedContact);
 
   if (userRow) {
     assertAccountActive(userRow);
@@ -498,18 +643,23 @@ export async function sendLoginOtp({ contact, method }) {
     [userRow?.id || null, normalizedContact, contactType, otp.codeHash, otp.expiresAt]
   );
 
-  if (env.isDev) {
-    console.log(`[DEV] Login OTP for ${normalizedContact}: ${code}`);
-  }
+  await sendOtpEmail(normalizedContact, code, {
+    purposeLabel: 'login',
+    subject: 'Your WWNGO login code',
+  });
 
   return {
     message: 'Verification code sent',
     expiresInMinutes: env.otp.expiresMinutes,
-    ...(env.isDev ? { devOtp: code } : {}),
   };
 }
 
 export async function verifyLoginOtp({ contact, method, code }) {
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
+  }
+
   const normalizedContact = normalizeContact(contact, method === 'email' ? 'email' : 'phone');
   const contactType = contactTypeForMethod(method);
   const isEmail = method === 'email';
@@ -537,7 +687,7 @@ export async function verifyLoginOtp({ contact, method, code }) {
     throw new AppError('Your account has been suspended', 403, 'ACCOUNT_SUSPENDED');
   }
 
-  const valid = await verifyTokenHash(code, otpRow.code_hash);
+  const valid = await verifyTokenHash(normalizedCode, otpRow.code_hash);
   if (!valid) {
     throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
   }
@@ -545,7 +695,7 @@ export async function verifyLoginOtp({ contact, method, code }) {
   await pool.query('UPDATE otp_codes SET verified_at = NOW() WHERE id = $1', [otpRow.id]);
 
   // Login OTP only authenticates — do not mark email/phone verified here.
-  // Verification happens via /verify-email and /verify-contact with DEMO_OTP_CODE.
+  // Email/phone verification is handled by /verify-email and /verify-contact.
   let userRow;
   if (otpRow.user_id) {
     userRow = await findUserById(otpRow.user_id);
@@ -571,8 +721,7 @@ export async function verifyLoginOtp({ contact, method, code }) {
 }
 
 /**
- * Email verification uses a fixed demo OTP (no real email delivery).
- * Phone / WhatsApp cross-verification still generates a random OTP.
+ * Email verification: generate a real OTP and send it via Gmail SMTP.
  */
 export async function sendEmailVerificationOtp(userId) {
   const userRow = await findUserById(userId);
@@ -600,7 +749,7 @@ export async function sendEmailVerificationOtp(userId) {
     [userId, purpose]
   );
 
-  const code = getDemoOtp();
+  const code = generateOtp();
   const otp = await createOtpRecord(code);
 
   await pool.query(
@@ -609,17 +758,23 @@ export async function sendEmailVerificationOtp(userId) {
     [userId, contact, otp.codeHash, purpose, otp.expiresAt]
   );
 
-  // Demo mode: do not send a real email; log the fixed OTP for testers.
-  console.log(`[DEMO] Email verification OTP for ${contact}: ${code}`);
+  await sendOtpEmail(contact, code, {
+    purposeLabel: 'email verification',
+    subject: 'Verify your WWNGO email',
+  });
 
   return {
     message: 'Verification code sent',
     expiresInMinutes: env.otp.expiresMinutes,
-    demoOtp: code,
   };
 }
 
 export async function verifyEmailVerificationOtp(userId, { code }) {
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
+  }
+
   const userRow = await findUserById(userId);
   if (!userRow) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
@@ -632,31 +787,40 @@ export async function verifyEmailVerificationOtp(userId, { code }) {
   const contact = userRow.email;
   const purpose = 'verify_email';
 
-  const { rows } = await pool.query(
-    `SELECT oc.*
-     FROM otp_codes oc
-     WHERE oc.user_id = $1
-       AND oc.contact = $2
-       AND oc.contact_type = 'email'
-       AND oc.purpose = $3
-       AND oc.verified_at IS NULL
-       AND oc.expires_at > NOW()
-     ORDER BY oc.created_at DESC
-     LIMIT 1`,
-    [userId, contact, purpose]
-  );
+  if (isDemoOtp(normalizedCode)) {
+    await pool.query(
+      `UPDATE otp_codes SET verified_at = NOW()
+       WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
+      [userId, purpose]
+    );
+  } else {
+    const { rows } = await pool.query(
+      `SELECT oc.*
+       FROM otp_codes oc
+       WHERE oc.user_id = $1
+         AND oc.contact = $2
+         AND oc.contact_type = 'email'
+         AND oc.purpose = $3
+         AND oc.verified_at IS NULL
+         AND oc.expires_at > NOW()
+       ORDER BY oc.created_at DESC
+       LIMIT 1`,
+      [userId, contact, purpose]
+    );
 
-  const otpRow = rows[0];
-  if (!otpRow) {
-    throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    const otpRow = rows[0];
+    if (!otpRow) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    const valid = await verifyTokenHash(normalizedCode, otpRow.code_hash);
+    if (!valid) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    await pool.query('UPDATE otp_codes SET verified_at = NOW() WHERE id = $1', [otpRow.id]);
   }
 
-  const valid = await verifyTokenHash(code, otpRow.code_hash);
-  if (!valid) {
-    throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
-  }
-
-  await pool.query('UPDATE otp_codes SET verified_at = NOW() WHERE id = $1', [otpRow.id]);
   await pool.query(
     `UPDATE users SET email_verified = TRUE, is_verified = TRUE WHERE id = $1`,
     [userId]
@@ -671,12 +835,17 @@ export async function sendCrossVerificationOtp(userId, { method }) {
     return sendEmailVerificationOtp(userId);
   }
 
+  // Phone SMS is not wired yet — use the fixed demo OTP for phone verification only.
   const userRow = await findUserById(userId);
   if (!userRow) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
   }
 
   assertAccountActive(userRow);
+
+  if (userRow.phone_verified) {
+    throw new AppError('Phone is already verified', 400, 'ALREADY_VERIFIED');
+  }
 
   const contact = userRow.phone;
   if (!contact) {
@@ -692,8 +861,7 @@ export async function sendCrossVerificationOtp(userId, { method }) {
     [userId, purpose]
   );
 
-  const code = getDemoOtp();
-  const otp = await createOtpRecord(code);
+  const otp = await createOtpRecord(DEMO_OTP_CODE);
   const contactType = contactTypeForMethod(method);
 
   await pool.query(
@@ -702,19 +870,20 @@ export async function sendCrossVerificationOtp(userId, { method }) {
     [userId, contact, contactType, otp.codeHash, purpose, otp.expiresAt]
   );
 
-  // Demo mode: do not send a real SMS; log the fixed OTP for testers.
-  console.log(`[DEMO] Phone verification OTP for ${contact}: ${code}`);
-
   return {
     message: 'Verification code sent',
     expiresInMinutes: env.otp.expiresMinutes,
-    demoOtp: code,
   };
 }
 
 export async function verifyCrossVerificationOtp(userId, { method, code }) {
   if (method === 'email') {
     return verifyEmailVerificationOtp(userId, { code });
+  }
+
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
   }
 
   const userRow = await findUserById(userId);
@@ -745,7 +914,7 @@ export async function verifyCrossVerificationOtp(userId, { method, code }) {
     throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
   }
 
-  const valid = await verifyTokenHash(code, otpRow.code_hash);
+  const valid = await verifyTokenHash(normalizedCode, otpRow.code_hash);
   if (!valid) {
     throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
   }

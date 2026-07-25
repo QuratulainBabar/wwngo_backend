@@ -43,17 +43,35 @@ export async function sumsubRequest(method, pathWithQuery, { body } = {}) {
   const signature = signRequest(ts, method, pathWithQuery, bodyStr);
   const url = `${env.sumsub.baseUrl}${pathWithQuery}`;
 
-  const response = await fetch(url, {
-    method,
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      'X-App-Token': env.sumsub.appToken,
-      'X-App-Access-Ts': ts,
-      'X-App-Access-Sig': signature,
-    },
-    body: bodyStr || undefined,
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-App-Token': env.sumsub.appToken,
+        'X-App-Access-Ts': ts,
+        'X-App-Access-Sig': signature,
+      },
+      body: bodyStr || undefined,
+    });
+  } catch (err) {
+    // Node undici surfaces TLS/network failures as TypeError("fetch failed").
+    // Corporate antivirus MITM often causes UNABLE_TO_VERIFY_LEAF_SIGNATURE —
+    // run the API with `node --use-system-ca` (see package.json scripts).
+    const cause = err?.cause;
+    const causeCode = cause?.code || '';
+    const causeMsg = cause?.message || '';
+    console.error('Sumsub network error:', err?.message, causeCode, causeMsg);
+    throw new AppError(
+      causeCode === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+        ? 'Unable to reach Sumsub (TLS certificate error). Restart the API with npm start / npm run dev so Node uses the system certificate store.'
+        : 'Unable to reach Sumsub identity service. Check server network connectivity and try again.',
+      502,
+      'SUMSUB_NETWORK_ERROR'
+    );
+  }
 
   const text = await response.text();
   let data = null;

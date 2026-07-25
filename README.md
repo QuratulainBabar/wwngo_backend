@@ -34,7 +34,7 @@ The API runs at `http://localhost:3000`.
 | POST | `/api/v1/auth/verify-otp` | Verify OTP, get reset token |
 | POST | `/api/v1/auth/reset-password` | Reset password with reset token |
 | POST | `/api/v1/auth/change-password` | Change password (authenticated) |
-| POST | `/api/v1/auth/verify-email/send` | Send email verification OTP (demo: always `123456`) |
+| POST | `/api/v1/auth/verify-email/send` | Send email verification OTP (Gmail SMTP) |
 | POST | `/api/v1/auth/verify-email/verify` | Verify email with OTP (authenticated) |
 | POST | `/api/v1/auth/verify-contact/send` | Send cross-verification OTP (email/phone) |
 | POST | `/api/v1/auth/verify-contact/verify` | Verify contact OTP (authenticated) |
@@ -45,5 +45,5 @@ The API runs at `http://localhost:3000`.
 - **refresh_tokens** — JWT refresh token rotation
 - **otp_codes** — password reset verification codes
 
-Email verification uses a fixed demo OTP (`DEMO_OTP_CODE`, default `123456`) and does not send a real email. The code is logged to the console and returned as `demoOtp`.
-In development, other OTP codes are logged to the console and included in the API response as `devOtp`.
+Email OTPs are generated randomly and delivered through Gmail SMTP (`SMTP_USER` + `SMTP_PASS` App Password). OTP codes are never returned in API responses.
+In development, phone OTP codes that cannot be delivered by SMS are logged to the server console only.

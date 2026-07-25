@@ -4,6 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AppError } from '../utils/errors.js';
 import * as deliveryRepository from '../repositories/delivery.repository.js';
+import * as notificationRepository from '../repositories/notification.repository.js';
+import { pool } from '../db/pool.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const UPLOADS_ROOT = path.join(__dirname, '../../uploads');
@@ -15,6 +17,10 @@ const ALLOWED_SIZES = new Set(['envelope', 'small box', 'medium box', 'large bag
 const MAX_MEETUP_LABEL_LENGTH = 240;
 const DEFAULT_PLATFORM_FEE = 5.0;
 const DEFAULT_PLATFORM_FEE_SHARE = 2.5;
+const MEETUP_ORIGIN_VALIDATION_MESSAGE =
+  'The selected meetup location must be within the selected From City. Please choose a valid meetup location.';
+const MEETUP_DESTINATION_VALIDATION_MESSAGE =
+  "The selected meetup location must be within the sender's destination city. Please choose a valid meetup location.";
 
 function generatePublicId() {
   const n = crypto.randomInt(10000, 99999);
@@ -68,6 +74,38 @@ function requireString(value, field) {
   return s;
 }
 
+function meetupBelongsToOrigin(meetupLabel, originCity) {
+  const city = String(originCity ?? '').trim().toLowerCase();
+  const label = String(meetupLabel ?? '').trim().toLowerCase();
+  if (!city || !label) return false;
+  return label.includes(city);
+}
+
+function assertMeetupsWithinOrigin(meetupLocations, originCity) {
+  const city = String(originCity ?? '').trim();
+  if (!city) return;
+  for (const loc of meetupLocations) {
+    if (!meetupBelongsToOrigin(loc, city)) {
+      throw new AppError(MEETUP_ORIGIN_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
+    }
+  }
+}
+
+function meetupBelongsToDestination(meetupLabel, destinationCity) {
+  const city = String(destinationCity ?? '').trim().toLowerCase();
+  const label = String(meetupLabel ?? '').trim().toLowerCase();
+  if (!city || !label) return false;
+  return label.includes(city);
+}
+
+function assertMeetupWithinDestination(meetupLabel, destinationCity) {
+  const city = String(destinationCity ?? '').trim();
+  if (!city) return;
+  if (!meetupBelongsToDestination(meetupLabel, city)) {
+    throw new AppError(MEETUP_DESTINATION_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
+  }
+}
+
 function buildRouteLabel(row) {
   if (row.delivery_type === 'country_to_country') {
     return `${row.origin_country} → ${row.destination_country}`;
@@ -108,6 +146,7 @@ function mapDelivery(row, photos = []) {
     id: row.id,
     publicId: row.public_id,
     senderId: row.sender_id,
+    senderName: row.sender_name || null,
     deliveryType: row.delivery_type,
     status: row.status,
     fromCity: row.from_city,
@@ -130,6 +169,8 @@ function mapDelivery(row, photos = []) {
     platformFeeShare: Number(row.platform_fee_share),
     receiverEmail: row.receiver_email,
     receiverPhone: row.receiver_phone,
+    receiverId: row.receiver_id || null,
+    receiverAcceptedAt: row.receiver_accepted_at || null,
     route: buildRouteLabel(row),
     photos: photos.map(mapPhoto),
     createdAt: row.created_at,
@@ -206,6 +247,18 @@ function validatePayload(body, files) {
     throw new AppError('receiverPhone must be a valid phone number', 400, 'VALIDATION_ERROR');
   }
 
+  const receiverMeetupLocation = requireString(
+    body.receiverMeetupLocation,
+    'receiverMeetupLocation'
+  );
+  if (receiverMeetupLocation.length > MAX_MEETUP_LABEL_LENGTH) {
+    throw new AppError(
+      `Meetup location is too long (max ${MAX_MEETUP_LABEL_LENGTH} characters)`,
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
   const photoFiles = files || [];
   if (photoFiles.length < 1 || photoFiles.length > 3) {
     throw new AppError('Upload between 1 and 3 parcel photos', 400, 'VALIDATION_ERROR');
@@ -223,6 +276,7 @@ function validatePayload(body, files) {
     acknowledged: true,
     receiverEmail,
     receiverPhone,
+    receiverMeetupLocation,
     platformFee: body.platformFee != null
       ? toNumber(body.platformFee, 'platformFee')
       : DEFAULT_PLATFORM_FEE,
@@ -240,21 +294,41 @@ function validatePayload(body, files) {
   };
 
   if (deliveryType === 'city_to_city') {
-    return {
+    const fromCity = requireString(body.fromCity, 'fromCity');
+    const toCity = requireString(body.toCity, 'toCity');
+    const payload = {
       ...base,
-      fromCity: requireString(body.fromCity, 'fromCity'),
+      fromCity,
       fromCode: requireString(body.fromCode, 'fromCode').toUpperCase(),
-      toCity: requireString(body.toCity, 'toCity'),
+      toCity,
       toCode: requireString(body.toCode, 'toCode').toUpperCase(),
     };
+    assertMeetupsWithinOrigin(preferredMeetupLocations, fromCity);
+    assertMeetupWithinDestination(receiverMeetupLocation, toCity);
+    return payload;
   }
+
+  const originCountry = requireString(body.originCountry, 'originCountry');
+  const originAirport = requireString(body.originAirport, 'originAirport');
+  const originCity = String(body.originCity ?? '').trim();
+  const destinationCountry = requireString(body.destinationCountry, 'destinationCountry');
+  const destinationAirport = requireString(body.destinationAirport, 'destinationAirport');
+  const destinationCity = String(body.destinationCity ?? '').trim();
+  assertMeetupsWithinOrigin(
+    preferredMeetupLocations,
+    originCity || originCountry
+  );
+  assertMeetupWithinDestination(
+    receiverMeetupLocation,
+    destinationCity || destinationCountry
+  );
 
   return {
     ...base,
-    originCountry: requireString(body.originCountry, 'originCountry'),
-    originAirport: requireString(body.originAirport, 'originAirport'),
-    destinationCountry: requireString(body.destinationCountry, 'destinationCountry'),
-    destinationAirport: requireString(body.destinationAirport, 'destinationAirport'),
+    originCountry,
+    originAirport,
+    destinationCountry,
+    destinationAirport,
   };
 }
 
@@ -300,7 +374,37 @@ export async function createDelivery(senderId, body, files) {
         photos: photoRecords,
       });
 
-      return mapDelivery(delivery, photos);
+      let mapped = mapDelivery(delivery, photos);
+
+      // Link + notify matching receiver account (email or phone).
+      try {
+        const receiverUserId =
+          (await deliveryRepository.findUserIdByEmail(payload.receiverEmail)) ||
+          (await deliveryRepository.findUserIdByPhone(payload.receiverPhone));
+        if (receiverUserId) {
+          const linked = await deliveryRepository.linkReceiverUser(
+            delivery.id,
+            receiverUserId
+          );
+          if (linked) {
+            mapped = mapDelivery(linked, photos);
+          }
+          await notificationRepository.createNotification({
+            userId: receiverUserId,
+            role: 'receiver',
+            type: 'parcelRequest',
+            title: 'Incoming Parcel Request',
+            body:
+              'A sender has requested to send you a parcel. Please review the parcel details and accept or decline the request.',
+            route: `/receiver-incoming-request/${mapped.publicId}`,
+          });
+        }
+      } catch (err) {
+        // Non-fatal: delivery already created — log so linking failures are visible.
+        console.error('[delivery] receiver notify/link failed:', err?.message || err);
+      }
+
+      return mapped;
     } catch (err) {
       await fs.rm(deliveryFolder, { recursive: true, force: true }).catch(() => {});
       // Retry on rare public_id collision.
@@ -359,4 +463,158 @@ export async function listSenderDeliveries(senderId, query = {}) {
     byDelivery.get(photo.delivery_id).push(photo);
   }
   return rows.map((row) => mapDelivery(row, byDelivery.get(row.id) || []));
+}
+
+async function loadUserContact(userId) {
+  const { rows } = await pool.query(
+    `SELECT email, phone FROM users WHERE id = $1`,
+    [userId]
+  );
+  return rows[0] || { email: '', phone: '' };
+}
+
+async function resolveUserContact(user) {
+  const contact = await loadUserContact(user.id);
+  return {
+    email: contact.email || user.email || '',
+    phone: contact.phone || '',
+  };
+}
+
+/**
+ * GET list for authenticated user. role=receiver returns parcels addressed to them.
+ */
+export async function listDeliveriesForUser(user, query = {}) {
+  const role = String(query.role || 'sender').toLowerCase();
+  if (role === 'receiver') {
+    return listReceiverDeliveries(user, query);
+  }
+  return listSenderDeliveries(user.id, query);
+}
+
+export async function listReceiverDeliveries(user, query = {}) {
+  const limit = Math.min(Number(query.limit) || 50, 100);
+  const offset = Math.max(Number(query.offset) || 0, 0);
+  const contact = await resolveUserContact(user);
+
+  const rows = await deliveryRepository.listDeliveriesForReceiver(
+    user.id,
+    contact.email,
+    contact.phone,
+    { limit, offset }
+  );
+  const photos = await deliveryRepository.listPhotosForDeliveries(rows.map((r) => r.id));
+  const byDelivery = new Map();
+  for (const photo of photos) {
+    if (!byDelivery.has(photo.delivery_id)) byDelivery.set(photo.delivery_id, []);
+    byDelivery.get(photo.delivery_id).push(photo);
+  }
+  return rows.map((row) => mapDelivery(row, byDelivery.get(row.id) || []));
+}
+
+export async function getDeliveryForUser(user, idOrPublicId, query = {}) {
+  const role = String(query.role || '').toLowerCase();
+  if (role === 'receiver') {
+    return getDeliveryForReceiver(user, idOrPublicId);
+  }
+
+  // Try sender first, then receiver (deep links / shared IDs).
+  try {
+    return await getDeliveryForSender(user.id, idOrPublicId);
+  } catch (err) {
+    if (err?.status !== 404) throw err;
+    return getDeliveryForReceiver(user, idOrPublicId);
+  }
+}
+
+export async function getDeliveryForReceiver(user, idOrPublicId) {
+  const contact = await resolveUserContact(user);
+
+  const looksLikeUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      idOrPublicId
+    );
+
+  const row = looksLikeUuid
+    ? await deliveryRepository.findDeliveryByIdForReceiver(
+        idOrPublicId,
+        user.id,
+        contact.email,
+        contact.phone
+      )
+    : await deliveryRepository.findDeliveryByPublicIdForReceiver(
+        idOrPublicId,
+        user.id,
+        contact.email,
+        contact.phone
+      );
+
+  if (!row) {
+    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+  }
+
+  const photos = await deliveryRepository.listPhotosForDelivery(row.id);
+  return mapDelivery(row, photos);
+}
+
+export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
+  const delivery = await getDeliveryForReceiver(user, idOrPublicId);
+  if (delivery.status === 'cancelled' || delivery.status === 'delivered') {
+    throw new AppError('This request can no longer be accepted', 400, 'INVALID_STATUS');
+  }
+  if (delivery.receiverAcceptedAt) {
+    return delivery;
+  }
+
+  const updated = await deliveryRepository.acceptDeliveryAsReceiver(delivery.id, user.id);
+  if (!updated) {
+    throw new AppError('Unable to accept this request', 400, 'ACCEPT_FAILED');
+  }
+
+  const photos = await deliveryRepository.listPhotosForDelivery(updated.id);
+  const mapped = mapDelivery(
+    { ...updated, sender_name: delivery.senderName },
+    photos
+  );
+
+  await notificationRepository.createNotification({
+    userId: delivery.senderId,
+    role: 'sender',
+    type: 'matching',
+    title: 'Receiver accepted',
+    body: `Receiver accepted ${mapped.publicId}. Matching travelers are now available.`,
+    route: `/bid-requests/${mapped.publicId}`,
+  }).catch(() => {});
+
+  // Ensure a chat thread exists between sender and receiver for this parcel.
+  try {
+    const chatRepo = await import('../repositories/chat.repository.js');
+    await chatRepo.ensureConversation({
+      deliveryId: mapped.id,
+      participantAId: delivery.senderId,
+      participantBId: user.id,
+    });
+  } catch {
+    // Non-fatal.
+  }
+
+  return mapped;
+}
+
+export async function declineDeliveryAsReceiver(user, idOrPublicId) {
+  const delivery = await getDeliveryForReceiver(user, idOrPublicId);
+  if (delivery.receiverAcceptedAt) {
+    throw new AppError('Accepted requests cannot be declined', 400, 'ALREADY_ACCEPTED');
+  }
+  if (delivery.status !== 'posted') {
+    throw new AppError('This request can no longer be declined', 400, 'INVALID_STATUS');
+  }
+
+  const updated = await deliveryRepository.declineDeliveryAsReceiver(delivery.id);
+  if (!updated) {
+    throw new AppError('Unable to decline this request', 400, 'DECLINE_FAILED');
+  }
+
+  const photos = await deliveryRepository.listPhotosForDelivery(updated.id);
+  return mapDelivery({ ...updated, sender_name: delivery.senderName }, photos);
 }

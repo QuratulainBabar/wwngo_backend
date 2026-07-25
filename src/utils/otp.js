@@ -2,21 +2,41 @@ import crypto from 'crypto';
 import { env } from '../config/env.js';
 import { hashToken } from './password.js';
 
+/** Always exactly 6 digits in [100000, 999999] — no leading zeros. */
+export const OTP_LENGTH = 6;
+
+/** Fixed demo code accepted for signup / login verification (never shown in UI). */
+export const DEMO_OTP_CODE = '123456';
+
 export function generateOtp() {
-  const max = 10 ** env.otp.length;
-  const code = crypto.randomInt(0, max).toString().padStart(env.otp.length, '0');
+  // Inclusive range so the emailed code is always visibly 6 digits.
+  const code = crypto.randomInt(100000, 1000000).toString();
+  if (code.length !== OTP_LENGTH) {
+    throw new Error('OTP generation failed: expected 6 digits');
+  }
   return code;
 }
 
-/** Fixed demo OTP used for email/phone verification while real delivery is disabled. */
-export function getDemoOtp() {
-  return env.otp.demoCode;
+export function assertOtpFormat(code) {
+  const normalized = String(code ?? '').trim();
+  if (!/^\d{6}$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+export function isDemoOtp(code) {
+  return assertOtpFormat(code) === DEMO_OTP_CODE;
 }
 
 export async function createOtpRecord(code) {
+  const normalized = assertOtpFormat(code);
+  if (!normalized) {
+    throw new Error('OTP must be exactly 6 digits');
+  }
   return {
-    code,
-    codeHash: await hashToken(code),
+    code: normalized,
+    codeHash: await hashToken(normalized),
     expiresAt: new Date(Date.now() + env.otp.expiresMinutes * 60 * 1000),
   };
 }

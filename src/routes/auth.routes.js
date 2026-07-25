@@ -6,6 +6,26 @@ const router = Router();
 
 router.post('/register', authController.registerValidators, validate, authController.register);
 router.post('/login', authController.loginValidators, validate, authController.login);
+router.post(
+  '/login/password-otp/send',
+  (req, _res, next) => {
+    console.log('[AUTH] POST /login/password-otp/send');
+    next();
+  },
+  authController.passwordLoginOtpSendValidators,
+  validate,
+  authController.sendPasswordLoginOtp
+);
+router.post(
+  '/login/password-otp/verify',
+  (req, _res, next) => {
+    console.log('[AUTH] POST /login/password-otp/verify');
+    next();
+  },
+  authController.passwordLoginOtpVerifyValidators,
+  validate,
+  authController.completePasswordLoginOtp
+);
 router.post('/refresh', authController.refresh);
 router.post('/logout', authController.logout);
 router.get('/me', authenticate, authController.me);

@@ -8,6 +8,7 @@ import {
   verifyWebhookDigest,
 } from './sumsub.client.js';
 import { getUserProfile } from './auth.service.js';
+import { grantKycWelcomeCredit } from './wallet.service.js';
 
 const USER_KYC_COLUMNS = `
   id, name, email, phone, country_code, bio, rating, review_count,
@@ -71,6 +72,16 @@ async function persistKycUpdate(userId, { kycStatus, applicantId, reviewStatus }
     `UPDATE users SET ${sets.join(', ')} WHERE id = $${i} RETURNING ${USER_KYC_COLUMNS}`,
     params
   );
+
+  // One-time $10 credit per role once KYC is approved.
+  if (kycStatus === 'approved') {
+    try {
+      await grantKycWelcomeCredit(userId);
+    } catch (err) {
+      console.error('KYC welcome wallet credit failed:', err?.message || err);
+    }
+  }
+
   return rows[0];
 }
 

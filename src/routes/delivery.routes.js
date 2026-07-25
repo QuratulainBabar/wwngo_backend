@@ -18,6 +18,13 @@ router.post(
 );
 
 router.get('/', authenticate, deliveryController.listDeliveries);
+router.get(
+  '/:id/matching-travelers',
+  authenticate,
+  deliveryController.listMatchingTravelers
+);
+router.post('/:id/accept', authenticate, deliveryController.acceptDelivery);
+router.post('/:id/decline', authenticate, deliveryController.declineDelivery);
 router.get('/:id', authenticate, deliveryController.getDelivery);
 
 export default router;

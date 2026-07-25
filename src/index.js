@@ -7,7 +7,13 @@ import { pool } from './db/pool.js';
 import authRoutes from './routes/auth.routes.js';
 import kycRoutes from './routes/kyc.routes.js';
 import deliveryRoutes from './routes/delivery.routes.js';
+import tripRoutes from './routes/trip.routes.js';
 import placesRoutes from './routes/places.routes.js';
+import walletRoutes from './routes/wallet.routes.js';
+import reviewRoutes from './routes/review.routes.js';
+import trustMetricsRoutes from './routes/trust_metrics.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
+import chatRoutes from './routes/chat.routes.js';
 import webhookRoutes from './routes/webhook.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { UPLOADS_ROOT } from './services/delivery.service.js';
@@ -44,7 +50,13 @@ app.get('/health', async (_req, res) => {
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/kyc', kycRoutes);
 app.use('/api/v1/deliveries', deliveryRoutes);
+app.use('/api/v1/trips', tripRoutes);
 app.use('/api/v1/places', placesRoutes);
+app.use('/api/v1/wallet', walletRoutes);
+app.use('/api/v1/reviews', reviewRoutes);
+app.use('/api/v1/trust-metrics', trustMetricsRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
+app.use('/api/v1/chats', chatRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

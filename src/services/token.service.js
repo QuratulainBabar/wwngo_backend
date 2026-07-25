@@ -63,7 +63,12 @@ export async function rotateRefreshToken(oldToken) {
 
   await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1', [matched.id]);
 
-  const accessToken = signAccessToken({ id: matched.user_id });
+  const { rows: userRows } = await pool.query(
+    'SELECT id, email FROM users WHERE id = $1',
+    [matched.user_id]
+  );
+  const user = userRows[0] || { id: matched.user_id };
+  const accessToken = signAccessToken(user);
   const refresh = await createRefreshToken(matched.user_id);
 
   return { accessToken, refreshToken: refresh.token, userId: matched.user_id };
