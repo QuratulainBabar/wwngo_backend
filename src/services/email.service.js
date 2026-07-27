@@ -96,3 +96,109 @@ export async function sendOtpEmail(to, code, options = {}) {
     );
   }
 }
+
+function formatDeliveryTypeLabel(deliveryType) {
+  switch (deliveryType) {
+    case 'country_to_country':
+      return 'Country to Country';
+    case 'city_to_city':
+    default:
+      return 'City to City';
+  }
+}
+
+/**
+ * Notify a receiver that a sender posted a parcel for them.
+ * Non-blocking for delivery creation — callers should catch/log failures.
+ * @param {string} to
+ * @param {{
+ *   publicId: string,
+ *   senderName?: string | null,
+ *   deliveryType: string,
+ *   route: string,
+ *   travelDate: string,
+ *   parcelCategory?: string,
+ *   maxBudget?: number,
+ * }} details
+ */
+export async function sendReceiverParcelRequestEmail(to, details) {
+  const senderLabel = String(details.senderName || '').trim() || 'A WWNGO sender';
+  const deliveryTypeLabel = formatDeliveryTypeLabel(details.deliveryType);
+  const route = String(details.route || '').trim() || '—';
+  const travelDate = String(details.travelDate || '').trim() || '—';
+  const parcelId = String(details.publicId || '').trim() || '—';
+  const category = String(details.parcelCategory || '').trim();
+  const maxBudget =
+    details.maxBudget != null && Number.isFinite(Number(details.maxBudget))
+      ? `$${Number(details.maxBudget).toFixed(2)}`
+      : null;
+
+  const subject = `WWNGO — Incoming parcel request (${parcelId})`;
+  const categoryLine = category ? `\nParcel type: ${category}` : '';
+  const budgetLine = maxBudget ? `\nMaximum budget: ${maxBudget}` : '';
+
+  const text =
+    `Hello,\n\n` +
+    `${senderLabel} has requested to send you a parcel on WWNGO.\n\n` +
+    `Delivery type: ${deliveryTypeLabel}\n` +
+    `Route: ${route}\n` +
+    `Travel date: ${travelDate}\n` +
+    `Parcel ID: ${parcelId}` +
+    `${categoryLine}` +
+    `${budgetLine}\n\n` +
+    `Open the WWNGO app, sign in with this email address, and review the request to accept or decline.\n\n` +
+    `If you were not expecting this parcel, you can ignore this email.`;
+
+  const htmlCategory = category
+    ? `<tr><td style="padding:4px 12px 4px 0;color:#555">Parcel type</td><td>${category}</td></tr>`
+    : '';
+  const htmlBudget = maxBudget
+    ? `<tr><td style="padding:4px 12px 4px 0;color:#555">Maximum budget</td><td>${maxBudget}</td></tr>`
+    : '';
+
+  const mail = {
+    from: env.smtp.from,
+    to,
+    subject,
+    text,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111;max-width:560px">
+        <h2 style="margin:0 0 12px">Incoming parcel request</h2>
+        <p style="margin:0 0 16px">
+          <strong>${senderLabel}</strong> has requested to send you a parcel on WWNGO.
+        </p>
+        <table style="border-collapse:collapse;margin:0 0 16px;font-size:15px">
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Delivery type</td><td>${deliveryTypeLabel}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Route</td><td>${route}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Travel date</td><td>${travelDate}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Parcel ID</td><td><strong>${parcelId}</strong></td></tr>
+          ${htmlCategory}
+          ${htmlBudget}
+        </table>
+        <p style="margin:0 0 16px">
+          Open the <strong>WWNGO</strong> app, sign in with this email address, and review the request to accept or decline.
+        </p>
+        <p style="margin:0;color:#888;font-size:13px">
+          If you were not expecting this parcel, you can ignore this email.
+        </p>
+      </div>
+    `,
+  };
+
+  try {
+    await getTransporter().sendMail(mail);
+    if (env.isDev) {
+      console.log(`[EMAIL] Parcel request notification sent to ${to} (${parcelId})`);
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    console.error('[EMAIL] Failed to send parcel request notification:', err?.message || err);
+    throw new AppError(
+      env.isDev
+        ? `Unable to send parcel request email: ${err?.message || err}`
+        : 'Unable to send parcel request email.',
+      502,
+      'EMAIL_SEND_FAILED'
+    );
+  }
+}

@@ -1,8 +1,10 @@
 import crypto from 'crypto';
 import { AppError } from '../utils/errors.js';
 import * as tripRepository from '../repositories/trip.repository.js';
+import { notifyRelevantSendersForNewTrip } from './trip_notification.service.js';
 
 const ALLOWED_TYPES = new Set(['city_to_city', 'country_to_country']);
+const TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL = 24;
 
 function generatePublicId() {
   const n = crypto.randomInt(10000, 99999);
@@ -202,7 +204,37 @@ export async function createTrip(travelerId, body) {
   if (!created) {
     throw new AppError('Unable to create trip', 500, 'INTERNAL_ERROR');
   }
+
+  try {
+    await notifyRelevantSendersForNewTrip(created, travelerId);
+  } catch (err) {
+    console.error('[trip] sender notification failed:', err?.message || err);
+  }
+
   return mapTrip(created);
+}
+
+export async function discoverTrips(query = {}) {
+  const limit = Math.min(Number(query.limit) || 50, 100);
+  const offset = Math.max(Number(query.offset) || 0, 0);
+  const tripType = String(query.tripType || '').trim();
+  const allowedType =
+    tripType === 'city_to_city' || tripType === 'country_to_country' ? tripType : null;
+
+  const rows = await tripRepository.listOpenTripsForDiscover({
+    limit,
+    offset,
+    tripType: allowedType,
+  });
+  return rows.map(mapTrip);
+}
+
+export async function getDiscoverableTrip(publicId) {
+  const row = await tripRepository.findOpenTripByPublicId(publicId);
+  if (!row) {
+    throw new AppError('Trip not found', 404, 'NOT_FOUND');
+  }
+  return mapTrip(row);
 }
 
 export async function listMyTrips(travelerId, query = {}) {
@@ -227,4 +259,96 @@ export async function getMyTrip(travelerId, idOrPublicId) {
     throw new AppError('Trip not found', 404, 'NOT_FOUND');
   }
   return mapTrip(row);
+}
+
+function assertTravelerCanModifyOpenTrip(trip) {
+  if (trip.status !== 'open_bid') {
+    throw new AppError(
+      'Only open trips can be edited or cancelled',
+      400,
+      'INVALID_STATUS'
+    );
+  }
+}
+
+function parseTravelDateForCancelCheck(travelDateStr) {
+  if (!travelDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(travelDateStr)) {
+    return null;
+  }
+  const [y, m, d] = travelDateStr.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function hoursUntilTravel(travelDateStr) {
+  const travelDate = parseTravelDateForCancelCheck(travelDateStr);
+  if (!travelDate) return null;
+  return (travelDate.getTime() - Date.now()) / (1000 * 60 * 60);
+}
+
+async function assertTravelerCanCancelTrip(trip) {
+  const requestCount = await tripRepository.countMatchingRequestsForTrip(trip.id);
+  if (requestCount === 0) return;
+
+  const hours = hoursUntilTravel(trip.travelDate);
+  if (hours == null) {
+    throw new AppError('Invalid travel date on trip', 400, 'VALIDATION_ERROR');
+  }
+  if (hours < TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL) {
+    throw new AppError(
+      `Cancellations must be made at least ${TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL} hours before travel`,
+      400,
+      'CANCEL_TOO_LATE'
+    );
+  }
+}
+
+/**
+ * PATCH traveler trip — all fields from trip creation (route, date, capacity, flight).
+ */
+export async function updateTripForTraveler(travelerId, idOrPublicId, body) {
+  const trip = await getMyTrip(travelerId, idOrPublicId);
+  assertTravelerCanModifyOpenTrip(trip);
+
+  const { tripType: _ignored, ...updates } = validatePayload({
+    ...body,
+    tripType: trip.tripType,
+  });
+
+  const updated = await tripRepository.updateTripForTraveler(
+    trip.id,
+    travelerId,
+    trip.tripType,
+    updates
+  );
+  if (!updated) {
+    throw new AppError('Unable to update this trip', 400, 'UPDATE_FAILED');
+  }
+
+  return mapTrip({
+    ...updated,
+    traveler_name: trip.travelerName,
+    traveler_rating: trip.travelerRating,
+    traveler_review_count: trip.travelerReviewCount,
+  });
+}
+
+/**
+ * POST traveler cancel — soft-cancels an open trip.
+ */
+export async function cancelTripForTraveler(travelerId, idOrPublicId) {
+  const trip = await getMyTrip(travelerId, idOrPublicId);
+  assertTravelerCanModifyOpenTrip(trip);
+  await assertTravelerCanCancelTrip(trip);
+
+  const updated = await tripRepository.cancelTripAsTraveler(trip.id, travelerId);
+  if (!updated) {
+    throw new AppError('Unable to cancel this trip', 400, 'CANCEL_FAILED');
+  }
+
+  return mapTrip({
+    ...updated,
+    traveler_name: trip.travelerName,
+    traveler_rating: trip.travelerRating,
+    traveler_review_count: trip.travelerReviewCount,
+  });
 }

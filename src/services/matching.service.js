@@ -89,8 +89,8 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
  * Returns travelers whose trip To matches the delivery To.
  * City-to-city compares to_city labels; country-to-country compares country codes/names.
  *
- * Own trips are included so dual-role (sender + traveler) accounts still surface
- * destination matches; the sender can choose not to request themselves.
+ * Own trips are excluded so sender, traveler, and receiver stay on separate
+ * Gmail accounts — the sender cannot match their own traveler trip.
  */
 export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
   const delivery = await loadSenderDelivery(senderId, idOrPublicId);
@@ -106,7 +106,7 @@ export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
     tripType: delivery.delivery_type,
     destinationLabel: dest.label,
     destinationCode: dest.code,
-    excludeTravelerId: null,
+    excludeTravelerId: senderId,
     limit: 100,
   });
 

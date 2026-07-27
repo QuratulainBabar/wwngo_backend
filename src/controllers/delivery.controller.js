@@ -64,3 +64,29 @@ export const listMatchingTravelers = asyncHandler(async (req, res) => {
   );
   res.json({ success: true, data: { travelers } });
 });
+
+/**
+ * PATCH /api/v1/deliveries/:id
+ * Sender updates all delivery fields (multipart when photos change).
+ */
+export const updateDelivery = asyncHandler(async (req, res) => {
+  const data = await deliveryService.updateDeliveryForSender(
+    req.user.id,
+    req.params.id,
+    req.body,
+    req.files || []
+  );
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /api/v1/deliveries/:id/cancel
+ * Sender cancels a posted delivery.
+ */
+export const cancelDelivery = asyncHandler(async (req, res) => {
+  const data = await deliveryService.cancelDeliveryForSender(
+    req.user.id,
+    req.params.id
+  );
+  res.json({ success: true, data });
+});

@@ -18,7 +18,7 @@ function relativeTime(date) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function mapNotification(row) {
+export function mapNotification(row) {
   return {
     id: row.id,
     role: row.role,

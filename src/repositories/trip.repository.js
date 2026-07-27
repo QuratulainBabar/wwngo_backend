@@ -84,6 +84,93 @@ export async function findTripByPublicIdForTraveler(publicId, travelerId) {
   return rows[0] || null;
 }
 
+export async function updateTripForTraveler(tripId, travelerId, tripType, fields) {
+  if (tripType === 'country_to_country') {
+    const { rows } = await pool.query(
+      `UPDATE trips
+       SET travel_date = $3,
+           luggage_capacity_kg = $4,
+           flight_number = $5,
+           origin_country = $6,
+           origin_country_code = $7,
+           origin_airport = $8,
+           destination_country = $9,
+           destination_country_code = $10,
+           destination_airport = $11,
+           updated_at = NOW()
+       WHERE id = $1
+         AND traveler_id = $2
+         AND status = 'open_bid'
+       RETURNING *`,
+      [
+        tripId,
+        travelerId,
+        fields.travelDate,
+        fields.luggageCapacityKg,
+        fields.flightNumber,
+        fields.originCountry,
+        fields.originCountryCode,
+        fields.originAirport,
+        fields.destinationCountry,
+        fields.destinationCountryCode,
+        fields.destinationAirport,
+      ]
+    );
+    return rows[0] || null;
+  }
+
+  const { rows } = await pool.query(
+    `UPDATE trips
+     SET travel_date = $3,
+         luggage_capacity_kg = $4,
+         flight_number = $5,
+         from_city = $6,
+         from_code = $7,
+         to_city = $8,
+         to_code = $9,
+         updated_at = NOW()
+     WHERE id = $1
+       AND traveler_id = $2
+       AND status = 'open_bid'
+     RETURNING *`,
+    [
+      tripId,
+      travelerId,
+      fields.travelDate,
+      fields.luggageCapacityKg,
+      fields.flightNumber,
+      fields.fromCity,
+      fields.fromCode,
+      fields.toCity,
+      fields.toCode,
+    ]
+  );
+  return rows[0] || null;
+}
+
+export async function cancelTripAsTraveler(tripId, travelerId) {
+  const { rows } = await pool.query(
+    `UPDATE trips
+     SET status = 'cancelled',
+         updated_at = NOW()
+     WHERE id = $1
+       AND traveler_id = $2
+       AND status = 'open_bid'
+     RETURNING *`,
+    [tripId, travelerId]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Count of pending sender match requests against this trip.
+ * Returns 0 until a bids/matching-requests table exists.
+ */
+export async function countMatchingRequestsForTrip(tripId) {
+  void tripId;
+  return 0;
+}
+
 /**
  * Open trips that may match a delivery destination (broad SQL prefilter).
  * Final destination equality is enforced in matching.service.js.
@@ -91,6 +178,47 @@ export async function findTripByPublicIdForTraveler(publicId, travelerId) {
  * City-to-city: prefilter by to_city label only (to_code is country ISO, not a city key).
  * Country-to-country: prefilter by destination_country_code (case-insensitive) OR country label.
  */
+export async function listOpenTripsForDiscover({ limit = 50, offset = 0, tripType } = {}) {
+  const params = [limit, offset];
+  let typeClause = '';
+  if (tripType) {
+    params.push(tripType);
+    typeClause = `AND t.trip_type = $${params.length}`;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT t.*,
+            u.name AS traveler_name,
+            u.rating AS traveler_rating,
+            u.review_count AS traveler_review_count,
+            u.bio AS traveler_bio
+     FROM trips t
+     INNER JOIN users u ON u.id = t.traveler_id
+     WHERE t.status = 'open_bid'
+       ${typeClause}
+     ORDER BY t.created_at DESC
+     LIMIT $1 OFFSET $2`,
+    params
+  );
+  return rows;
+}
+
+export async function findOpenTripByPublicId(publicId) {
+  const { rows } = await pool.query(
+    `SELECT t.*,
+            u.name AS traveler_name,
+            u.rating AS traveler_rating,
+            u.review_count AS traveler_review_count,
+            u.bio AS traveler_bio
+     FROM trips t
+     INNER JOIN users u ON u.id = t.traveler_id
+     WHERE t.public_id = $1
+       AND t.status = 'open_bid'`,
+    [publicId]
+  );
+  return rows[0] || null;
+}
+
 export async function listOpenTripsForDestinationMatch({
   tripType,
   destinationLabel,

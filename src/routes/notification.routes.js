@@ -10,6 +10,7 @@ const roleQuery = query('role')
   .withMessage('role must be sender, traveler, or receiver');
 
 router.get('/', authenticate, roleQuery, validate, notificationController.listNotifications);
+router.get('/stream', authenticate, roleQuery, validate, notificationController.streamNotifications);
 router.get('/unread-count', authenticate, roleQuery, validate, notificationController.unreadCount);
 router.patch('/:id/read', authenticate, notificationController.markRead);
 router.post('/mark-all-read', authenticate, notificationController.markAllRead);

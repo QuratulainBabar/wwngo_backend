@@ -4,7 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AppError } from '../utils/errors.js';
 import * as deliveryRepository from '../repositories/delivery.repository.js';
-import * as notificationRepository from '../repositories/notification.repository.js';
+import * as notificationCreateService from './notification_create.service.js';
+import { sendReceiverParcelRequestEmail } from './email.service.js';
 import { pool } from '../db/pool.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +18,7 @@ const ALLOWED_SIZES = new Set(['envelope', 'small box', 'medium box', 'large bag
 const MAX_MEETUP_LABEL_LENGTH = 240;
 const DEFAULT_PLATFORM_FEE = 5.0;
 const DEFAULT_PLATFORM_FEE_SHARE = 2.5;
+const SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL = 24;
 const MEETUP_ORIGIN_VALIDATION_MESSAGE =
   'The selected meetup location must be within the selected From City. Please choose a valid meetup location.';
 const MEETUP_DESTINATION_VALIDATION_MESSAGE =
@@ -169,6 +171,7 @@ function mapDelivery(row, photos = []) {
     platformFeeShare: Number(row.platform_fee_share),
     receiverEmail: row.receiver_email,
     receiverPhone: row.receiver_phone,
+    receiverMeetupLocation: row.receiver_meetup_location || null,
     receiverId: row.receiver_id || null,
     receiverAcceptedAt: row.receiver_accepted_at || null,
     route: buildRouteLabel(row),
@@ -178,8 +181,7 @@ function mapDelivery(row, photos = []) {
   };
 }
 
-function validatePayload(body, files) {
-  const deliveryType = requireString(body.deliveryType, 'deliveryType');
+function validateDeliveryFormBody(body, deliveryType) {
   if (!ALLOWED_TYPES.has(deliveryType)) {
     throw new AppError(
       'deliveryType must be city_to_city or country_to_country',
@@ -259,11 +261,6 @@ function validatePayload(body, files) {
     );
   }
 
-  const photoFiles = files || [];
-  if (photoFiles.length < 1 || photoFiles.length > 3) {
-    throw new AppError('Upload between 1 and 3 parcel photos', 400, 'VALIDATION_ERROR');
-  }
-
   const base = {
     deliveryType,
     travelDate,
@@ -332,6 +329,48 @@ function validatePayload(body, files) {
   };
 }
 
+function validatePayload(body, files) {
+  const deliveryType = requireString(body.deliveryType, 'deliveryType');
+  const photoFiles = files || [];
+  if (photoFiles.length < 1 || photoFiles.length > 3) {
+    throw new AppError('Upload between 1 and 3 parcel photos', 400, 'VALIDATION_ERROR');
+  }
+  return validateDeliveryFormBody(body, deliveryType);
+}
+
+function normalizePhoneDigits(phone) {
+  return String(phone ?? '').replace(/\D/g, '');
+}
+
+async function assertReceiverDistinctFromSender(senderId, receiverEmail, receiverPhone) {
+  const { rows } = await pool.query(
+    `SELECT email, phone FROM users WHERE id = $1`,
+    [senderId]
+  );
+  const sender = rows[0];
+  if (!sender) return;
+
+  const normalizedReceiverEmail = String(receiverEmail).trim().toLowerCase();
+  const senderEmail = String(sender.email ?? '').trim().toLowerCase();
+  if (senderEmail && normalizedReceiverEmail === senderEmail) {
+    throw new AppError(
+      'Receiver email must be different from your sender account email. The receiver should sign in with their own Gmail.',
+      400,
+      'RECEIVER_EMAIL_SAME_AS_SENDER'
+    );
+  }
+
+  const receiverDigits = normalizePhoneDigits(receiverPhone);
+  const senderDigits = normalizePhoneDigits(sender.phone);
+  if (receiverDigits && senderDigits && receiverDigits === senderDigits) {
+    throw new AppError(
+      'Receiver phone must be different from your sender account phone. Each role should use its own account.',
+      400,
+      'RECEIVER_PHONE_SAME_AS_SENDER'
+    );
+  }
+}
+
 async function ensureUploadDir() {
   await fs.mkdir(DELIVERY_UPLOADS_DIR, { recursive: true });
 }
@@ -341,6 +380,11 @@ async function ensureUploadDir() {
  */
 export async function createDelivery(senderId, body, files) {
   const payload = validatePayload(body, files);
+  await assertReceiverDistinctFromSender(
+    senderId,
+    payload.receiverEmail,
+    payload.receiverPhone
+  );
   await ensureUploadDir();
 
   let lastError;
@@ -375,13 +419,29 @@ export async function createDelivery(senderId, body, files) {
       });
 
       let mapped = mapDelivery(delivery, photos);
+      const senderName = await loadSenderName(senderId);
+
+      // Email the receiver at the address provided on the delivery form.
+      try {
+        await sendReceiverParcelRequestEmail(payload.receiverEmail, {
+          publicId: mapped.publicId,
+          senderName,
+          deliveryType: mapped.deliveryType,
+          route: mapped.route,
+          travelDate: mapped.travelDate,
+          parcelCategory: mapped.parcelCategory,
+          maxBudget: mapped.maxBudget,
+        });
+      } catch (err) {
+        console.error('[delivery] receiver email failed:', err?.message || err);
+      }
 
       // Link + notify matching receiver account (email or phone).
       try {
         const receiverUserId =
           (await deliveryRepository.findUserIdByEmail(payload.receiverEmail)) ||
           (await deliveryRepository.findUserIdByPhone(payload.receiverPhone));
-        if (receiverUserId) {
+        if (receiverUserId && receiverUserId !== senderId) {
           const linked = await deliveryRepository.linkReceiverUser(
             delivery.id,
             receiverUserId
@@ -389,7 +449,7 @@ export async function createDelivery(senderId, body, files) {
           if (linked) {
             mapped = mapDelivery(linked, photos);
           }
-          await notificationRepository.createNotification({
+          await notificationCreateService.createNotification({
             userId: receiverUserId,
             role: 'receiver',
             type: 'parcelRequest',
@@ -471,6 +531,11 @@ async function loadUserContact(userId) {
     [userId]
   );
   return rows[0] || { email: '', phone: '' };
+}
+
+async function loadSenderName(senderId) {
+  const { rows } = await pool.query(`SELECT name FROM users WHERE id = $1`, [senderId]);
+  return rows[0]?.name || null;
 }
 
 async function resolveUserContact(user) {
@@ -559,6 +624,13 @@ export async function getDeliveryForReceiver(user, idOrPublicId) {
 
 export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
   const delivery = await getDeliveryForReceiver(user, idOrPublicId);
+  if (delivery.senderId === user.id) {
+    throw new AppError(
+      'You cannot accept a delivery you created as sender. Sign in with the receiver Gmail account instead.',
+      400,
+      'SENDER_CANNOT_ACCEPT_AS_RECEIVER'
+    );
+  }
   if (delivery.status === 'cancelled' || delivery.status === 'delivered') {
     throw new AppError('This request can no longer be accepted', 400, 'INVALID_STATUS');
   }
@@ -577,7 +649,7 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
     photos
   );
 
-  await notificationRepository.createNotification({
+  await notificationCreateService.createNotification({
     userId: delivery.senderId,
     role: 'sender',
     type: 'matching',
@@ -613,6 +685,165 @@ export async function declineDeliveryAsReceiver(user, idOrPublicId) {
   const updated = await deliveryRepository.declineDeliveryAsReceiver(delivery.id);
   if (!updated) {
     throw new AppError('Unable to decline this request', 400, 'DECLINE_FAILED');
+  }
+
+  const photos = await deliveryRepository.listPhotosForDelivery(updated.id);
+  return mapDelivery({ ...updated, sender_name: delivery.senderName }, photos);
+}
+
+function assertSenderCanModifyPostedDelivery(delivery) {
+  if (delivery.status !== 'posted') {
+    throw new AppError(
+      'Only posted deliveries can be edited or cancelled',
+      400,
+      'INVALID_STATUS'
+    );
+  }
+}
+
+function parseTravelDateForCancelCheck(travelDateStr) {
+  if (!travelDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(travelDateStr)) {
+    return null;
+  }
+  const [y, m, d] = travelDateStr.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function assertSenderCanCancelBeforeTravel(travelDateStr) {
+  const travelDate = parseTravelDateForCancelCheck(travelDateStr);
+  if (!travelDate) {
+    throw new AppError('Invalid travel date on delivery', 400, 'VALIDATION_ERROR');
+  }
+  const now = new Date();
+  const msUntilTravel = travelDate.getTime() - now.getTime();
+  const hoursUntilTravel = msUntilTravel / (1000 * 60 * 60);
+  if (hoursUntilTravel < SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL) {
+    throw new AppError(
+      `Cancellations must be made at least ${SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL} hours before travel`,
+      400,
+      'CANCEL_TOO_LATE'
+    );
+  }
+}
+
+function parseRetainedPhotoIds(raw) {
+  if (raw == null || raw === '') return [];
+  if (Array.isArray(raw)) {
+    return raw.map((id) => String(id).trim()).filter(Boolean);
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((id) => String(id).trim()).filter(Boolean);
+      }
+    } catch {
+      return trimmed
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+    }
+  }
+  return [];
+}
+
+async function saveDeliveryPhotoFiles(publicId, files) {
+  const deliveryFolder = path.join(DELIVERY_UPLOADS_DIR, publicId);
+  await fs.mkdir(deliveryFolder, { recursive: true });
+  const photoRecords = [];
+  for (let i = 0; i < files.length; i += 1) {
+    const file = files[i];
+    const ext = path.extname(file.originalname || '') || guessExt(file.mimetype);
+    const filename = `photo_${Date.now()}_${i + 1}${ext}`;
+    const absolutePath = path.join(deliveryFolder, filename);
+    await fs.writeFile(absolutePath, file.buffer);
+    photoRecords.push({
+      filePath: `deliveries/${publicId}/${filename}`,
+      originalName: file.originalname || filename,
+      mimeType: file.mimetype,
+      sizeBytes: file.size,
+    });
+  }
+  return photoRecords;
+}
+
+/**
+ * PATCH sender delivery — all fields from delivery creation.
+ */
+export async function updateDeliveryForSender(senderId, idOrPublicId, body, files = []) {
+  const delivery = await getDeliveryForSender(senderId, idOrPublicId);
+  assertSenderCanModifyPostedDelivery(delivery);
+
+  const payload = validateDeliveryFormBody(
+    { ...body, deliveryType: delivery.deliveryType, acknowledged: 'true' },
+    delivery.deliveryType
+  );
+  await assertReceiverDistinctFromSender(
+    senderId,
+    payload.receiverEmail,
+    payload.receiverPhone
+  );
+
+  const retainedPhotoIds = parseRetainedPhotoIds(body.retainedPhotoIds);
+  const newFiles = files || [];
+  const existingPhotos = await deliveryRepository.listPhotosForDelivery(delivery.id);
+  const validRetained = retainedPhotoIds.filter((id) =>
+    existingPhotos.some((photo) => photo.id === id)
+  );
+  const totalPhotos = validRetained.length + newFiles.length;
+  if (totalPhotos < 1 || totalPhotos > 3) {
+    throw new AppError('Upload between 1 and 3 parcel photos', 400, 'VALIDATION_ERROR');
+  }
+
+  const updated = await deliveryRepository.updateDeliveryForSender(
+    delivery.id,
+    senderId,
+    delivery.deliveryType,
+    payload
+  );
+  if (!updated) {
+    throw new AppError('Unable to update this delivery', 400, 'UPDATE_FAILED');
+  }
+
+  let photos = existingPhotos;
+  if (newFiles.length > 0 || validRetained.length !== existingPhotos.length) {
+    const photoRecords =
+      newFiles.length > 0 ? await saveDeliveryPhotoFiles(delivery.publicId, newFiles) : [];
+    await deliveryRepository.replaceDeliveryPhotos(
+      delivery.id,
+      photoRecords,
+      validRetained
+    );
+    photos = await deliveryRepository.listPhotosForDelivery(delivery.id);
+  }
+
+  return mapDelivery({ ...updated, sender_name: delivery.senderName }, photos);
+}
+
+/**
+ * POST sender cancel — sets status to cancelled when still posted.
+ */
+export async function cancelDeliveryForSender(senderId, idOrPublicId) {
+  const delivery = await getDeliveryForSender(senderId, idOrPublicId);
+  assertSenderCanModifyPostedDelivery(delivery);
+  assertSenderCanCancelBeforeTravel(delivery.travelDate);
+
+  const updated = await deliveryRepository.cancelDeliveryAsSender(delivery.id, senderId);
+  if (!updated) {
+    throw new AppError('Unable to cancel this delivery', 400, 'CANCEL_FAILED');
+  }
+
+  if (updated.receiver_id) {
+    await notificationCreateService.createNotification({
+      userId: updated.receiver_id,
+      role: 'receiver',
+      type: 'cancellation',
+      title: 'Delivery cancelled',
+      body: `The sender cancelled parcel request ${delivery.publicId}.`,
+      route: '/receiver-incoming',
+    }).catch(() => {});
   }
 
   const photos = await deliveryRepository.listPhotosForDelivery(updated.id);
