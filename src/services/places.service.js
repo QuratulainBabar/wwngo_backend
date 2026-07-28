@@ -17,14 +17,19 @@ function assertConfigured() {
 
 /**
  * @param {string} query
- * @param {'cities'|'places'} mode
+ * @param {'cities'|'places'|'airports'} mode
  */
 export async function autocomplete(query, mode = 'places') {
   assertConfigured();
   const trimmed = String(query || '').trim();
   if (trimmed.length < 2) return { predictions: [] };
 
-  const types = mode === 'cities' ? '(cities)' : 'establishment|geocode';
+  const types =
+    mode === 'cities'
+      ? '(cities)'
+      : mode === 'airports'
+        ? 'airport'
+        : 'establishment|geocode';
   const url = new URL(PLACES_AUTOCOMPLETE);
   url.searchParams.set('input', trimmed);
   url.searchParams.set('key', env.googleMapsApiKey);

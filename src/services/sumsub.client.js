@@ -4,6 +4,30 @@ import { AppError } from '../utils/errors.js';
 
 const SUMSUB_KYC_ENABLED = true;
 
+function collectErrorCodes(err) {
+  const codes = [];
+  let cur = err;
+  let depth = 0;
+  while (cur && depth < 6) {
+    if (cur.code) codes.push(String(cur.code));
+    cur = cur.cause;
+    depth += 1;
+  }
+  return codes;
+}
+
+function collectErrorMessages(err) {
+  const messages = [];
+  let cur = err;
+  let depth = 0;
+  while (cur && depth < 6) {
+    if (cur.message) messages.push(String(cur.message));
+    cur = cur.cause;
+    depth += 1;
+  }
+  return messages;
+}
+
 function assertConfigured() {
   if (!env.sumsub.appToken || !env.sumsub.secretKey) {
     throw new AppError(
@@ -59,13 +83,15 @@ export async function sumsubRequest(method, pathWithQuery, { body } = {}) {
   } catch (err) {
     // Node undici surfaces TLS/network failures as TypeError("fetch failed").
     // Corporate antivirus MITM often causes UNABLE_TO_VERIFY_LEAF_SIGNATURE —
-    // run the API with `node --use-system-ca` (see package.json scripts).
-    const cause = err?.cause;
-    const causeCode = cause?.code || '';
-    const causeMsg = cause?.message || '';
-    console.error('Sumsub network error:', err?.message, causeCode, causeMsg);
+    // tls.js merges the system CA store; npm scripts also pass --use-system-ca.
+    const causeCode = collectErrorCodes(err);
+    const causeMsg = collectErrorMessages(err);
+    const isTls =
+      causeCode.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE') ||
+      causeMsg.some((m) => /unable to verify|certificate/i.test(m));
+    console.error('Sumsub network error:', err?.message, causeCode.join('|'), causeMsg[0] || '');
     throw new AppError(
-      causeCode === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+      isTls
         ? 'Unable to reach Sumsub (TLS certificate error). Restart the API with npm start / npm run dev so Node uses the system certificate store.'
         : 'Unable to reach Sumsub identity service. Check server network connectivity and try again.',
       502,

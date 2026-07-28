@@ -155,8 +155,9 @@ export async function getKycStatus(userId, { sync = true } = {}) {
       synced = true;
     } catch (err) {
       // Applicant may not exist yet (user has not opened SDK). Keep local status.
-      if (err.code !== 'SUMSUB_API_ERROR' && err.status !== 404) {
-        if (err.status && err.status >= 500) throw err;
+      const status = err.statusCode ?? err.status;
+      if (err.code !== 'SUMSUB_API_ERROR' && status !== 404) {
+        if (status && status >= 500) throw err;
       }
     }
   }

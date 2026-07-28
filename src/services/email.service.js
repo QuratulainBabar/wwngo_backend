@@ -35,6 +35,11 @@ function getTransporter() {
     port: env.smtp.port,
     secure: env.smtp.port === 465,
     requireTLS: env.smtp.port === 587,
+    // Windows/LAN often fails Gmail on IPv6 (ECONNREFUSED ::587). Prefer IPv4.
+    family: 4,
+    connectionTimeout: 12_000,
+    greetingTimeout: 12_000,
+    socketTimeout: 20_000,
     auth: {
       user: env.smtp.user,
       pass: env.smtp.pass,

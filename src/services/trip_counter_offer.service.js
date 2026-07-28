@@ -1,4 +1,5 @@
 import { AppError } from '../utils/errors.js';
+import { pool } from '../db/pool.js';
 import * as requestRepository from '../repositories/trip_sender_request.repository.js';
 import * as offerRepository from '../repositories/trip_counter_offer.repository.js';
 import * as notificationCreateService from './notification_create.service.js';
@@ -12,6 +13,14 @@ function formatDateOnly(value) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+async function travelerDisplayName(travelerId) {
+  const { rows } = await pool.query(`SELECT name FROM users WHERE id = $1`, [
+    travelerId,
+  ]);
+  const name = String(rows[0]?.name ?? '').trim();
+  return name || 'A traveler';
 }
 
 function deliveryRoute(row) {
@@ -100,16 +109,27 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
 
   const isUpdate = existing != null;
   const deliveryPublicId = mapped.deliveryPublicId || request.delivery_public_id;
+  const travelerName = await travelerDisplayName(travelerId).catch(() => 'A traveler');
+  const amountLabel = `$${amount.toFixed(2)}`;
+  const routeLabel = mapped.route || 'your parcel';
+
   await notificationCreateService
     .createNotification({
-      userId: request.sender_id,
+      userId: String(request.sender_id),
       role: 'sender',
       type: 'counterOffer',
-      title: isUpdate ? 'Counter offer updated' : 'New counter offer',
+      title: isUpdate
+        ? 'Counter offer updated by traveler'
+        : 'Counter offer sent by traveler',
       body: isUpdate
-        ? `A traveler updated their counter offer to $${amount.toFixed(2)} for ${deliveryPublicId} (${mapped.route}).`
-        : `A traveler sent a counter offer of $${amount.toFixed(2)} for ${deliveryPublicId} (${mapped.route}).`,
+        ? `${travelerName} updated their counter offer to ${amountLabel} for ${deliveryPublicId} (${routeLabel}). Review parcel details to accept.`
+        : `${travelerName} sent a counter offer of ${amountLabel} for ${deliveryPublicId} (${routeLabel}). Review parcel details to accept.`,
       route: `/shipment/${deliveryPublicId}`,
+    })
+    .then(() => {
+      console.log(
+        `[counter-offer] sender alert created for ${deliveryPublicId} → ${request.sender_id}`
+      );
     })
     .catch((err) => {
       console.error('[counter-offer] notify sender failed:', err?.message || err);

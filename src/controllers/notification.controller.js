@@ -32,7 +32,7 @@ export const markAllRead = asyncHandler(async (req, res) => {
 
 export const streamNotifications = asyncHandler(async (req, res) => {
   const role = String(req.query.role || '').toLowerCase();
-  const userId = req.user.id;
+  const userId = String(req.user.id);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');

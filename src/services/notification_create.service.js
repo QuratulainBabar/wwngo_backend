@@ -13,9 +13,12 @@ export async function createNotification({
   body,
   route = null,
 }) {
+  const normalizedUserId = String(userId);
+  const normalizedRole = String(role || '').toLowerCase();
+
   const row = await notificationRepository.createNotification({
-    userId,
-    role,
+    userId: normalizedUserId,
+    role: normalizedRole,
     type,
     title,
     body,
@@ -23,9 +26,12 @@ export async function createNotification({
   });
 
   const notification = mapNotification(row);
-  const unreadCount = await notificationRepository.countUnread(userId, role);
+  const unreadCount = await notificationRepository.countUnread(
+    normalizedUserId,
+    normalizedRole
+  );
 
-  publish(userId, role, {
+  publish(normalizedUserId, normalizedRole, {
     event: 'notification',
     notification,
     unreadCount,

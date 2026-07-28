@@ -2,13 +2,17 @@ import * as placesService from '../services/places.service.js';
 import { asyncHandler } from '../utils/errors.js';
 
 /**
- * GET /api/v1/places/autocomplete?q=&mode=cities|places
+ * GET /api/v1/places/autocomplete?q=&mode=cities|places|airports
  */
 export const autocomplete = asyncHandler(async (req, res) => {
   const q = String(req.query.q || req.query.input || '').trim();
-  const mode = String(req.query.mode || 'places').toLowerCase() === 'cities'
-    ? 'cities'
-    : 'places';
+  const rawMode = String(req.query.mode || 'places').toLowerCase();
+  const mode =
+    rawMode === 'cities'
+      ? 'cities'
+      : rawMode === 'airports'
+        ? 'airports'
+        : 'places';
   const data = await placesService.autocomplete(q, mode);
   res.json({ success: true, data });
 });

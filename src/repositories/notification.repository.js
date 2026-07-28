@@ -72,3 +72,15 @@ export async function markUnreadByRoute(userId, role, route) {
   );
   return rows.length;
 }
+
+/** True if an inbox item already exists for this deep-link route. */
+export async function existsByUserRoleRoute(userId, role, route) {
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM notifications
+     WHERE user_id = $1 AND role = $2 AND route = $3
+     LIMIT 1`,
+    [userId, role, route]
+  );
+  return rows.length > 0;
+}

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import os from 'os';
+import { trustSystemCertificates } from './config/tls.js';
 import { env } from './config/env.js';
 import { pool } from './db/pool.js';
 import authRoutes from './routes/auth.routes.js';
@@ -17,6 +18,9 @@ import chatRoutes from './routes/chat.routes.js';
 import webhookRoutes from './routes/webhook.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { UPLOADS_ROOT } from './services/delivery.service.js';
+
+// Must run before any outbound HTTPS (Sumsub, Places, etc.).
+trustSystemCertificates();
 
 const app = express();
 

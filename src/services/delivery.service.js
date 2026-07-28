@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AppError } from '../utils/errors.js';
 import * as deliveryRepository from '../repositories/delivery.repository.js';
+import * as notificationRepository from '../repositories/notification.repository.js';
 import * as notificationCreateService from './notification_create.service.js';
 import { sendReceiverParcelRequestEmail } from './email.service.js';
 import { pool } from '../db/pool.js';
@@ -421,26 +422,16 @@ export async function createDelivery(senderId, body, files) {
       let mapped = mapDelivery(delivery, photos);
       const senderName = await loadSenderName(senderId);
 
-      // Email the receiver at the address provided on the delivery form.
-      try {
-        await sendReceiverParcelRequestEmail(payload.receiverEmail, {
-          publicId: mapped.publicId,
-          senderName,
-          deliveryType: mapped.deliveryType,
-          route: mapped.route,
-          travelDate: mapped.travelDate,
-          parcelCategory: mapped.parcelCategory,
-          maxBudget: mapped.maxBudget,
-        });
-      } catch (err) {
-        console.error('[delivery] receiver email failed:', err?.message || err);
-      }
-
-      // Link + notify matching receiver account (email or phone).
+      // Link + notify matching receiver account FIRST so in-app alerts and
+      // receiver lists update even if SMTP is slow/down (Flutter times out at 20s).
       try {
         const receiverUserId =
           (await deliveryRepository.findUserIdByEmail(payload.receiverEmail)) ||
           (await deliveryRepository.findUserIdByPhone(payload.receiverPhone));
+        console.log(
+          `[delivery] ${publicId} receiver lookup:`,
+          receiverUserId ? `user=${receiverUserId}` : 'no matching account'
+        );
         if (receiverUserId && receiverUserId !== senderId) {
           const linked = await deliveryRepository.linkReceiverUser(
             delivery.id,
@@ -458,11 +449,32 @@ export async function createDelivery(senderId, body, files) {
               'A sender wants to send a parcel through you. Please review the request and accept or decline it.',
             route: `/receiver-incoming-request/${mapped.publicId}`,
           });
+          console.log(`[delivery] ${publicId} receiver alert created`);
         }
       } catch (err) {
         // Non-fatal: delivery already created — log so linking failures are visible.
         console.error('[delivery] receiver notify/link failed:', err?.message || err);
       }
+
+      // Email the form address in background (IPv4 SMTP). Never block the HTTP
+      // response — notify/link already completed above.
+      void sendReceiverParcelRequestEmail(payload.receiverEmail, {
+        publicId: mapped.publicId,
+        senderName,
+        deliveryType: mapped.deliveryType,
+        route: mapped.route,
+        travelDate: mapped.travelDate,
+        parcelCategory: mapped.parcelCategory,
+        maxBudget: mapped.maxBudget,
+      })
+        .then(() => {
+          console.log(
+            `[delivery] ${publicId} receiver email accepted for ${payload.receiverEmail}`
+          );
+        })
+        .catch((err) => {
+          console.error('[delivery] receiver email failed:', err?.message || err);
+        });
 
       return mapped;
     } catch (err) {
@@ -568,6 +580,10 @@ export async function listReceiverDeliveries(user, query = {}) {
     contact.phone,
     { limit, offset }
   );
+
+  // Heal missing in-app alerts for pending requests (older creates / failed notify).
+  await ensureReceiverParcelRequestNotifications(user.id, rows);
+
   const photos = await deliveryRepository.listPhotosForDeliveries(rows.map((r) => r.id));
   const byDelivery = new Map();
   for (const photo of photos) {
@@ -575,6 +591,52 @@ export async function listReceiverDeliveries(user, query = {}) {
     byDelivery.get(photo.delivery_id).push(photo);
   }
   return rows.map((row) => mapDelivery(row, byDelivery.get(row.id) || []));
+}
+
+/**
+ * Ensure each pending incoming delivery has a receiver Alerts item.
+ * Idempotent — skips routes that already exist.
+ */
+async function ensureReceiverParcelRequestNotifications(userId, rows) {
+  for (const row of rows) {
+    if (row.status !== 'posted' || row.receiver_accepted_at) continue;
+    const publicId = row.public_id;
+    if (!publicId) continue;
+
+    if (!row.receiver_id) {
+      try {
+        await deliveryRepository.linkReceiverUser(row.id, userId);
+      } catch (err) {
+        console.error('[delivery] backfill link failed:', err?.message || err);
+      }
+    }
+
+    const route = `/receiver-incoming-request/${publicId}`;
+    try {
+      const exists = await notificationRepository.existsByUserRoleRoute(
+        userId,
+        'receiver',
+        route
+      );
+      if (exists) continue;
+
+      await notificationCreateService.createNotification({
+        userId,
+        role: 'receiver',
+        type: 'parcelRequest',
+        title: 'Incoming Parcel Request',
+        body:
+          'A sender wants to send a parcel through you. Please review the request and accept or decline it.',
+        route,
+      });
+      console.log(`[delivery] backfilled receiver alert for ${publicId}`);
+    } catch (err) {
+      console.error(
+        `[delivery] backfill notify failed for ${publicId}:`,
+        err?.message || err
+      );
+    }
+  }
 }
 
 export async function getDeliveryForUser(user, idOrPublicId, query = {}) {
