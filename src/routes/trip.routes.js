@@ -30,6 +30,26 @@ router.get(
   tripController.getCounterOffer
 );
 router.get(
+  '/sender-counter-offers/by-delivery/:deliveryPublicId',
+  authenticate,
+  tripController.getSenderCounterOfferByDelivery
+);
+router.get(
+  '/sender-counter-offers/:offerId',
+  authenticate,
+  tripController.getSenderCounterOffer
+);
+router.post(
+  '/sender-counter-offers/:offerId/accept',
+  authenticate,
+  tripController.acceptSenderCounterOffer
+);
+router.post(
+  '/sender-counter-offers/:offerId/reject',
+  authenticate,
+  tripController.rejectSenderCounterOffer
+);
+router.get(
   '/sender-request-trips',
   authenticate,
   tripController.listSenderRequestTrips

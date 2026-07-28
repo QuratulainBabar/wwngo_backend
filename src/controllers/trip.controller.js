@@ -125,6 +125,54 @@ export const getCounterOffer = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /api/v1/trips/sender-counter-offers/by-delivery/:deliveryPublicId
+ */
+export const getSenderCounterOfferByDelivery = asyncHandler(async (req, res) => {
+  const offerService = await import('../services/trip_counter_offer.service.js');
+  const data = await offerService.getCounterOfferForSenderByDelivery(
+    req.user.id,
+    req.params.deliveryPublicId
+  );
+  res.json({ success: true, data });
+});
+
+/**
+ * GET /api/v1/trips/sender-counter-offers/:offerId
+ */
+export const getSenderCounterOffer = asyncHandler(async (req, res) => {
+  const offerService = await import('../services/trip_counter_offer.service.js');
+  const data = await offerService.getCounterOfferForSender(
+    req.user.id,
+    req.params.offerId
+  );
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /api/v1/trips/sender-counter-offers/:offerId/accept
+ */
+export const acceptSenderCounterOffer = asyncHandler(async (req, res) => {
+  const offerService = await import('../services/trip_counter_offer.service.js');
+  const data = await offerService.acceptCounterOfferForSender(
+    req.user.id,
+    req.params.offerId
+  );
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /api/v1/trips/sender-counter-offers/:offerId/reject
+ */
+export const rejectSenderCounterOffer = asyncHandler(async (req, res) => {
+  const offerService = await import('../services/trip_counter_offer.service.js');
+  const data = await offerService.rejectCounterOfferForSender(
+    req.user.id,
+    req.params.offerId
+  );
+  res.json({ success: true, data });
+});
+
+/**
  * GET /api/v1/trips
  */
 export const listTrips = asyncHandler(async (req, res) => {
