@@ -455,7 +455,7 @@ export async function createDelivery(senderId, body, files) {
             type: 'parcelRequest',
             title: 'Incoming Parcel Request',
             body:
-              'A sender has requested to send you a parcel. Please review the parcel details and accept or decline the request.',
+              'A sender wants to send a parcel through you. Please review the request and accept or decline it.',
             route: `/receiver-incoming-request/${mapped.publicId}`,
           });
         }
@@ -652,7 +652,7 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
   await notificationCreateService.createNotification({
     userId: delivery.senderId,
     role: 'sender',
-    type: 'matching',
+    type: 'deliveryStatus',
     title: 'Receiver accepted',
     body: `Receiver accepted ${mapped.publicId}. Matching travelers are now available.`,
     route: `/bid-requests/${mapped.publicId}`,

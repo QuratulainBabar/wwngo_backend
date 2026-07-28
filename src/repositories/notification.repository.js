@@ -57,3 +57,18 @@ export async function markAllRead(userId, role) {
     [userId, role]
   );
 }
+
+/** Mark unread inbox items that deep-link to a given route (exact match). */
+export async function markUnreadByRoute(userId, role, route) {
+  const { rows } = await pool.query(
+    `UPDATE notifications
+     SET unread = FALSE
+     WHERE user_id = $1
+       AND role = $2
+       AND unread = TRUE
+       AND route = $3
+     RETURNING id`,
+    [userId, role, route]
+  );
+  return rows.length;
+}

@@ -66,6 +66,20 @@ export const listMatchingTravelers = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/v1/deliveries/:id/request-traveler
+ * Sender sends a parcel request to a matching traveler trip.
+ */
+export const requestTraveler = asyncHandler(async (req, res) => {
+  const requestService = await import('../services/trip_sender_request.service.js');
+  const data = await requestService.requestTravelerForDelivery(
+    req.user.id,
+    req.params.id,
+    req.body || {}
+  );
+  res.status(201).json({ success: true, data });
+});
+
+/**
  * PATCH /api/v1/deliveries/:id
  * Sender updates all delivery fields (multipart when photos change).
  */

@@ -23,6 +23,11 @@ router.get(
   authenticate,
   deliveryController.listMatchingTravelers
 );
+router.post(
+  '/:id/request-traveler',
+  authenticate,
+  deliveryController.requestTraveler
+);
 router.post('/:id/accept', authenticate, deliveryController.acceptDelivery);
 router.post('/:id/decline', authenticate, deliveryController.declineDelivery);
 router.post('/:id/cancel', authenticate, deliveryController.cancelDelivery);

@@ -56,6 +56,21 @@ export async function listTripsForTraveler(travelerId, { limit = 50, offset = 0 
   return rows;
 }
 
+export async function findTripById(tripId) {
+  const { rows } = await pool.query(
+    `SELECT t.*,
+            u.name AS traveler_name,
+            u.rating AS traveler_rating,
+            u.review_count AS traveler_review_count,
+            u.bio AS traveler_bio
+     FROM trips t
+     LEFT JOIN users u ON u.id = t.traveler_id
+     WHERE t.id = $1`,
+    [tripId]
+  );
+  return rows[0] || null;
+}
+
 export async function findTripByIdForTraveler(tripId, travelerId) {
   const { rows } = await pool.query(
     `SELECT t.*,
@@ -164,11 +179,10 @@ export async function cancelTripAsTraveler(tripId, travelerId) {
 
 /**
  * Count of pending sender match requests against this trip.
- * Returns 0 until a bids/matching-requests table exists.
  */
 export async function countMatchingRequestsForTrip(tripId) {
-  void tripId;
-  return 0;
+  const requestRepo = await import('./trip_sender_request.repository.js');
+  return requestRepo.countPendingRequestsForTrip(tripId);
 }
 
 /**
@@ -211,10 +225,29 @@ export async function findOpenTripByPublicId(publicId) {
             u.review_count AS traveler_review_count,
             u.bio AS traveler_bio
      FROM trips t
-     INNER JOIN users u ON u.id = t.traveler_id
+     LEFT JOIN users u ON u.id = t.traveler_id
      WHERE t.public_id = $1
        AND t.status = 'open_bid'`,
     [publicId]
+  );
+  return rows[0] || null;
+}
+
+/** Sender notification / discover detail — any status, by public id. */
+export async function findDiscoverableTripByPublicId(publicId) {
+  const id = String(publicId ?? '').trim();
+  if (!id) return null;
+
+  const { rows } = await pool.query(
+    `SELECT t.*,
+            u.name AS traveler_name,
+            u.rating AS traveler_rating,
+            u.review_count AS traveler_review_count,
+            u.bio AS traveler_bio
+     FROM trips t
+     LEFT JOIN users u ON u.id = t.traveler_id
+     WHERE t.public_id = $1`,
+    [id]
   );
   return rows[0] || null;
 }

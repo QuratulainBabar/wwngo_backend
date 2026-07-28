@@ -1,8 +1,6 @@
 import crypto from 'crypto';
 import { AppError } from '../utils/errors.js';
 import * as tripRepository from '../repositories/trip.repository.js';
-import { notifyRelevantSendersForNewTrip } from './trip_notification.service.js';
-
 const ALLOWED_TYPES = new Set(['city_to_city', 'country_to_country']);
 const TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL = 24;
 
@@ -205,12 +203,6 @@ export async function createTrip(travelerId, body) {
     throw new AppError('Unable to create trip', 500, 'INTERNAL_ERROR');
   }
 
-  try {
-    await notifyRelevantSendersForNewTrip(created, travelerId);
-  } catch (err) {
-    console.error('[trip] sender notification failed:', err?.message || err);
-  }
-
   return mapTrip(created);
 }
 
@@ -230,7 +222,7 @@ export async function discoverTrips(query = {}) {
 }
 
 export async function getDiscoverableTrip(publicId) {
-  const row = await tripRepository.findOpenTripByPublicId(publicId);
+  const row = await tripRepository.findDiscoverableTripByPublicId(publicId);
   if (!row) {
     throw new AppError('Trip not found', 404, 'NOT_FOUND');
   }
