@@ -1,0 +1,30 @@
+{
+  "name": "wwngo-backend",
+  "version": "1.0.0",
+  "description": "WWNGO API server",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --use-system-ca src/index.js",
+    "dev": "node --use-system-ca --watch src/index.js",
+    "db:migrate": "node --use-system-ca src/db/migrate.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.864.0",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.3",
+    "pg": "^8.16.0",
+    "socket.io": "^4.8.1",
+    "stripe": "^18.4.0"
+  }
+}

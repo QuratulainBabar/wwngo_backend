@@ -1,0 +1,354 @@
+import { AppError } from '../utils/errors.js';
+import * as walletRepo from '../repositories/wallet.repository.js';
+
+export const MINIMUM_WITHDRAWAL_CENTS = 1000;
+
+/** One-time credit after identity verification — $10 per role. */
+export const KYC_WELCOME_CREDIT_CENTS = 1000;
+export const KYC_WELCOME_DESCRIPTION =
+  'Welcome credit after identity verification';
+const KYC_WELCOME_ROLES = ['sender', 'traveler', 'receiver'];
+
+function mapLedgerEntry(row) {
+  return {
+    id: row.id,
+    role: row.role,
+    type: toCamelType(row.type),
+    amountCents: Number(row.amount_cents),
+    availableDeltaCents: Number(row.available_delta_cents),
+    escrowDeltaCents: Number(row.escrow_delta_cents),
+    description: row.description,
+    shipmentId: row.shipment_id || null,
+    hiddenFromHistory: Boolean(row.hidden_from_history),
+    createdAt: row.created_at?.toISOString?.() ?? row.created_at,
+  };
+}
+
+function toCamelType(dbType) {
+  const map = {
+    top_up: 'topUp',
+    withdrawal: 'withdrawal',
+    escrow_hold: 'escrowHold',
+    escrow_release: 'escrowRelease',
+    escrow_freeze: 'escrowFreeze',
+    delivery_payout: 'deliveryPayout',
+    platform_fee: 'platformFee',
+    refund: 'refund',
+  };
+  return map[dbType] || dbType;
+}
+
+function mapWallet(row) {
+  return {
+    role: row.role,
+    availableCents: Number(row.available_cents),
+    escrowCents: Number(row.escrow_cents),
+    currency: 'USD',
+    minimumWithdrawalCents: MINIMUM_WITHDRAWAL_CENTS,
+  };
+}
+
+/**
+ * Wallet summary for the authenticated user + role.
+ * Always returns zeros when no activity exists (new user).
+ */
+export async function getWalletSummary(userId, role, { recentLimit = 6 } = {}) {
+  const wallet = await walletRepo.getWallet(userId, role);
+  const recent = await walletRepo.listLedgerEntries(userId, role, {
+    limit: recentLimit,
+    includeHidden: false,
+  });
+
+  return {
+    ...mapWallet(wallet),
+    recentTransactions: recent.map(mapLedgerEntry),
+  };
+}
+
+export async function listTransactions(userId, role, { limit = 50 } = {}) {
+  await walletRepo.ensureWallet(userId, role);
+  const rows = await walletRepo.listLedgerEntries(userId, role, {
+    limit,
+    includeHidden: false,
+  });
+  return {
+    transactions: rows.map(mapLedgerEntry),
+  };
+}
+
+export async function getShipmentEscrow(userId, shipmentId) {
+  const row = await walletRepo.getShipmentEscrow(shipmentId);
+  if (!row || row.user_id !== userId) {
+    return {
+      shipmentId,
+      amountCents: 0,
+      status: 'none',
+    };
+  }
+  return {
+    shipmentId: row.shipment_id,
+    amountCents: Number(row.amount_cents),
+    status: row.status,
+    role: row.role,
+  };
+}
+
+/**
+ * Idempotent: credit $10 available to sender, traveler, and receiver wallets
+ * after KYC approval. Safe to call from Continue-to-app and KYC sync/webhook.
+ */
+export async function grantKycWelcomeCredit(userId) {
+  if (!userId) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+
+  const alreadyGranted = await walletRepo.hasLedgerDescription(
+    userId,
+    KYC_WELCOME_DESCRIPTION
+  );
+
+  if (!alreadyGranted) {
+    for (const role of KYC_WELCOME_ROLES) {
+      await walletRepo.appendLedgerEntry({
+        userId,
+        role,
+        type: 'top_up',
+        amountCents: KYC_WELCOME_CREDIT_CENTS,
+        availableDeltaCents: KYC_WELCOME_CREDIT_CENTS,
+        description: KYC_WELCOME_DESCRIPTION,
+      });
+    }
+  }
+
+  const wallets = {};
+  for (const role of KYC_WELCOME_ROLES) {
+    wallets[role] = mapWallet(await walletRepo.getWallet(userId, role));
+  }
+
+  return {
+    granted: !alreadyGranted,
+    alreadyGranted,
+    amountCents: KYC_WELCOME_CREDIT_CENTS,
+    roles: KYC_WELCOME_ROLES,
+    wallets,
+  };
+}
+
+/**
+ * Credit available balance (mock Stripe top-up until payments are wired).
+ */
+export async function topUp(userId, role, amountCents) {
+  const cents = Number(amountCents);
+  if (!Number.isInteger(cents) || cents <= 0) {
+    throw new AppError('Top-up amount must be a positive integer (cents)', 400, 'VALIDATION_ERROR');
+  }
+
+  const stripeService = await import('./stripe.service.js');
+  if (stripeService.isConfigured()) {
+    return createTopUpPaymentIntent(userId, role, cents);
+  }
+
+  const { wallet, entry } = await walletRepo.appendLedgerEntry({
+    userId,
+    role,
+    type: 'top_up',
+    amountCents: cents,
+    availableDeltaCents: cents,
+    description: 'Top-up via Stripe',
+  });
+
+  return {
+    ...mapWallet(wallet),
+    entry: mapLedgerEntry(entry),
+    mock: true,
+  };
+}
+
+/**
+ * Create Stripe PaymentIntent for wallet top-up; credits on webhook success.
+ */
+export async function createTopUpPaymentIntent(userId, role, amountCents) {
+  const stripeService = await import('./stripe.service.js');
+  const { pool } = await import('../db/pool.js');
+
+  const intent = await stripeService.createPaymentIntent({
+    amountCents,
+    customerId: userId,
+    metadata: {
+      purpose: 'wallet_top_up',
+      userId,
+      role,
+      amountCents: String(amountCents),
+    },
+  });
+
+  await pool.query(
+    `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+    [userId, role, amountCents, intent.id]
+  );
+
+  return {
+    paymentIntentId: intent.id,
+    clientSecret: intent.client_secret,
+    amountCents,
+    role,
+    requiresPayment: true,
+    mock: Boolean(intent.mock),
+  };
+}
+
+export async function completeTopUpFromPaymentIntent(paymentIntentId) {
+  const { pool } = await import('../db/pool.js');
+  const { rows } = await pool.query(
+    `SELECT * FROM pending_topups
+     WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+     FOR UPDATE`,
+    [paymentIntentId]
+  );
+  const pending = rows[0];
+  if (!pending) return { credited: false };
+
+  const { wallet, entry } = await walletRepo.appendLedgerEntry({
+    userId: pending.user_id,
+    role: pending.role,
+    type: 'top_up',
+    amountCents: Number(pending.amount_cents),
+    availableDeltaCents: Number(pending.amount_cents),
+    description: 'Top-up via Stripe',
+  });
+
+  await pool.query(
+    `UPDATE pending_topups SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+    [pending.id]
+  );
+
+  return { credited: true, wallet: mapWallet(wallet), entry: mapLedgerEntry(entry) };
+}
+
+/**
+ * Debit available balance; uses Stripe Connect transfer when account is linked.
+ */
+export async function withdraw(userId, role, amountCents) {
+  const cents = Number(amountCents);
+  if (!Number.isInteger(cents) || cents <= 0) {
+    throw new AppError('Withdrawal amount must be a positive integer (cents)', 400, 'VALIDATION_ERROR');
+  }
+  if (cents < MINIMUM_WITHDRAWAL_CENTS) {
+    throw new AppError(
+      `Minimum withdrawal is $${(MINIMUM_WITHDRAWAL_CENTS / 100).toFixed(2)}`,
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const stripeService = await import('./stripe.service.js');
+  const { pool } = await import('../db/pool.js');
+  const { rows } = await pool.query(
+    `SELECT stripe_connect_account_id, email FROM users WHERE id = $1`,
+    [userId]
+  );
+  const user = rows[0];
+  const connectAccountId = user?.stripe_connect_account_id;
+
+  if (stripeService.isConfigured() && connectAccountId) {
+    const account = await stripeService.getConnectAccount(connectAccountId);
+    if (!account.charges_enabled && !account.payouts_enabled && !account.mock) {
+      throw new AppError(
+        'Complete Stripe Connect onboarding before withdrawing',
+        403,
+        'CONNECT_NOT_READY'
+      );
+    }
+    await stripeService.createConnectTransfer({
+      amountCents: cents,
+      destinationAccount: connectAccountId,
+      metadata: { userId, role },
+    });
+  }
+
+  try {
+    const { wallet, entry } = await walletRepo.appendLedgerEntry({
+      userId,
+      role,
+      type: 'withdrawal',
+      amountCents: cents,
+      availableDeltaCents: -cents,
+      description: connectAccountId
+        ? 'Withdrawal via Stripe Connect'
+        : 'Withdrawal (ledger — link Connect for bank payout)',
+    });
+    return {
+      ...mapWallet(wallet),
+      entry: mapLedgerEntry(entry),
+      connectAccountId: connectAccountId || null,
+    };
+  } catch (err) {
+    if (err.code === 'INSUFFICIENT_BALANCE') {
+      throw new AppError('Amount exceeds available balance', 400, 'INSUFFICIENT_BALANCE');
+    }
+    throw err;
+  }
+}
+
+export async function getConnectStatus(userId) {
+  const { pool } = await import('../db/pool.js');
+  const stripeService = await import('./stripe.service.js');
+  const { rows } = await pool.query(
+    `SELECT stripe_connect_account_id FROM users WHERE id = $1`,
+    [userId]
+  );
+  const accountId = rows[0]?.stripe_connect_account_id;
+  if (!accountId) {
+    return { linked: false, ready: false, accountId: null };
+  }
+  if (!stripeService.isConfigured()) {
+    return { linked: true, ready: false, accountId, mock: true };
+  }
+  const account = await stripeService.getConnectAccount(accountId);
+  return {
+    linked: true,
+    ready: Boolean(account.charges_enabled || account.payouts_enabled || account.mock),
+    accountId,
+    mock: Boolean(account.mock),
+  };
+}
+
+export async function startConnectOnboarding(userId, { returnPath = '/wallet' } = {}) {
+  const { pool } = await import('../db/pool.js');
+  const stripeService = await import('./stripe.service.js');
+  const { env } = await import('../config/env.js');
+
+  const { rows } = await pool.query(`SELECT email, stripe_connect_account_id FROM users WHERE id = $1`, [
+    userId,
+  ]);
+  const user = rows[0];
+  if (!user) throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+
+  let accountId = user.stripe_connect_account_id;
+  if (!accountId) {
+    const account = await stripeService.createConnectAccount({
+      email: user.email,
+      userId,
+    });
+    accountId = account.id;
+    await pool.query(
+      `UPDATE users SET stripe_connect_account_id = $2, updated_at = NOW() WHERE id = $1`,
+      [userId, accountId]
+    );
+  }
+
+  const base = env.appPublicUrl.replace(/\/$/, '');
+  const returnUrl = `${base}${returnPath}`;
+  const link = await stripeService.createConnectAccountLink(accountId, {
+    refreshUrl: `${returnUrl}?connect=refresh`,
+    returnUrl: `${returnUrl}?connect=done`,
+  });
+
+  return {
+    accountId,
+    onboardingUrl: link.url,
+    mock: Boolean(link.mock),
+  };
+}
