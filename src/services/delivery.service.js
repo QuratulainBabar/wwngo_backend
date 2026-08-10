@@ -235,8 +235,8 @@ function validateDeliveryFormBody(body, deliveryType) {
   if (preferredMeetupLocations.length < 1) {
     throw new AppError('Select at least one preferred meetup location', 400, 'VALIDATION_ERROR');
   }
-  if (preferredMeetupLocations.length > 4) {
-    throw new AppError('Select up to 4 preferred meetup locations', 400, 'VALIDATION_ERROR');
+  if (preferredMeetupLocations.length > 3) {
+    throw new AppError('Select up to 3 preferred meetup locations', 400, 'VALIDATION_ERROR');
   }
   for (const loc of preferredMeetupLocations) {
     if (loc.length > MAX_MEETUP_LABEL_LENGTH) {

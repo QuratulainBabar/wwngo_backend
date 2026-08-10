@@ -24,21 +24,61 @@ export async function recordCheckpoint({
   const delivery = await getDeliveryForCheckpoint(deliveryId, userId, checkpoint);
   const deviceHash = deviceId ? hashDevice(deviceId) : null;
 
-  const { rows } = await pool.query(
-    `INSERT INTO nfc_checkpoints (delivery_id, checkpoint, initiator_id, device_hash, gps_lat, gps_lng, confirmed_at)
-     VALUES ($1, $2::nfc_checkpoint_type, $3, $4, $5, $6, CASE WHEN $7 THEN NOW() ELSE NULL END)
-     ON CONFLICT (delivery_id, checkpoint) DO UPDATE SET
-       device_hash = COALESCE(EXCLUDED.device_hash, nfc_checkpoints.device_hash),
-       gps_lat = COALESCE(EXCLUDED.gps_lat, nfc_checkpoints.gps_lat),
-       gps_lng = COALESCE(EXCLUDED.gps_lng, nfc_checkpoints.gps_lng),
-       confirmed_at = CASE WHEN $7 THEN NOW() ELSE nfc_checkpoints.confirmed_at END
-     RETURNING *`,
-    [deliveryId, checkpoint, userId, deviceHash, gpsLat, gpsLng, confirm]
+  const { rows: existingRows } = await pool.query(
+    `SELECT * FROM nfc_checkpoints WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
+    [deliveryId, checkpoint]
   );
+  const existing = existingRows[0];
 
-  const record = rows[0];
+  if (existing?.confirmed_at) {
+    return mapCheckpoint(existing);
+  }
 
-  if (confirm) {
+  let record;
+  if (!existing) {
+    const { rows } = await pool.query(
+      `INSERT INTO nfc_checkpoints (delivery_id, checkpoint, initiator_id, device_hash, gps_lat, gps_lng, confirmed_at)
+       VALUES ($1, $2::nfc_checkpoint_type, $3, $4, $5, $6, NULL)
+       RETURNING *`,
+      [deliveryId, checkpoint, userId, deviceHash, gpsLat, gpsLng]
+    );
+    record = rows[0];
+  } else {
+    const isSecondParty =
+      confirm &&
+      existing.initiator_id !== userId &&
+      !existing.confirmer_id;
+    const { rows } = await pool.query(
+      `UPDATE nfc_checkpoints SET
+         confirmer_id = CASE WHEN $2 THEN $3 ELSE confirmer_id END,
+         device_hash = COALESCE($4, device_hash),
+         gps_lat = COALESCE($5, gps_lat),
+         gps_lng = COALESCE($6, gps_lng),
+         confirmed_at = CASE WHEN $2 THEN NOW() ELSE confirmed_at END
+       WHERE delivery_id = $1 AND checkpoint = $7::nfc_checkpoint_type
+       RETURNING *`,
+      [
+        deliveryId,
+        isSecondParty,
+        userId,
+        deviceHash,
+        gpsLat,
+        gpsLng,
+        checkpoint,
+      ]
+    );
+    record = rows[0];
+  }
+
+  if (confirm && existing && existing.initiator_id === userId && !existing.confirmer_id) {
+    throw new AppError(
+      'Waiting for the other party to confirm NFC on their device',
+      400,
+      'NFC_PENDING_PEER'
+    );
+  }
+
+  if (record.confirmed_at) {
     await applyCheckpointEffects(delivery, checkpoint, userId);
   }
 
@@ -70,7 +110,11 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
 
   if (checkpoint === 'handoff_sender_traveler') {
     if (delivery.traveler_id) {
-      await escrowService.chargeTravelerHandoffFee(delivery.traveler_id, publicId);
+      await escrowService.chargeTravelerHandoffFee(
+        delivery.traveler_id,
+        publicId,
+        delivery.parcel_category
+      );
     }
     await deliveryState.transitionDelivery({
       deliveryId: delivery.id,
@@ -86,7 +130,6 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
       note: 'Parcel in transit after handoff',
     });
 
-    // Unlock traveler-receiver thread
     if (delivery.traveler_id && delivery.receiver_id) {
       await chatRepository.ensureConversation({
         deliveryId: delivery.id,
@@ -97,14 +140,34 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
       });
     }
 
-    await notificationCreateService.createNotification({
-      userId: delivery.receiver_id,
-      role: 'receiver',
-      type: 'deliveryStatus',
-      title: 'Parcel collected',
-      body: `Your parcel ${publicId} has been collected by the traveler.`,
-      route: `/receiver-tracking`,
-    }).catch(() => {});
+    for (const [uid, role, title, body, route] of [
+      [
+        delivery.sender_id,
+        'sender',
+        'Parcel collected',
+        `Your parcel ${publicId} was handed to the traveler.`,
+        `/shipment/${publicId}`,
+      ],
+      [
+        delivery.receiver_id,
+        'receiver',
+        'Parcel collected',
+        `Your parcel ${publicId} has been collected by the traveler.`,
+        `/receiver-tracking`,
+      ],
+    ]) {
+      if (!uid) continue;
+      await notificationCreateService
+        .createNotification({
+          userId: uid,
+          role,
+          type: 'deliveryStatus',
+          title,
+          body,
+          route,
+        })
+        .catch(() => {});
+    }
   }
 
   if (checkpoint === 'delivery_traveler_receiver') {
@@ -119,14 +182,16 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
       await escrowService.releaseEscrowForDelivery(publicId, delivery.traveler_id);
     }
 
-    await notificationCreateService.createNotification({
-      userId: delivery.sender_id,
-      role: 'sender',
-      type: 'deliveryStatus',
-      title: 'Delivery complete',
-      body: `Parcel ${publicId} was delivered successfully.`,
-      route: `/shipment/${publicId}`,
-    }).catch(() => {});
+    await notificationCreateService
+      .createNotification({
+        userId: delivery.sender_id,
+        role: 'sender',
+        type: 'deliveryStatus',
+        title: 'Delivery complete',
+        body: `Parcel ${publicId} was delivered successfully.`,
+        route: `/shipment/${publicId}`,
+      })
+      .catch(() => {});
   }
 }
 
@@ -161,6 +226,7 @@ function mapCheckpoint(row) {
     gpsLat: row.gps_lat != null ? Number(row.gps_lat) : null,
     gpsLng: row.gps_lng != null ? Number(row.gps_lng) : null,
     confirmedAt: row.confirmed_at,
+    pendingPeer: Boolean(row.initiator_id && !row.confirmer_id && !row.confirmed_at),
     fraudFlag: row.fraud_flag,
     createdAt: row.created_at,
   };

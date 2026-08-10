@@ -6,6 +6,7 @@ import * as notificationRepository from '../repositories/notification.repository
 import * as notificationCreateService from './notification_create.service.js';
 import { publish } from './notification_hub.js';
 import { mapTrip } from './trip.service.js';
+import { MAX_TRAVELER_REQUESTS_PER_DELIVERY } from '../utils/fees.js';
 
 function formatDateOnly(value) {
   if (value == null) return null;
@@ -61,6 +62,8 @@ function mapSenderRequest(row) {
     createdAt: row.created_at,
   };
 }
+
+async function loadSenderDelivery(senderId, idOrPublicId) {
   const looksLikeUuid =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       idOrPublicId
@@ -105,6 +108,15 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
   }
   if (delivery.status === 'cancelled' || delivery.status === 'delivered') {
     throw new AppError('This delivery can no longer request travelers', 400, 'INVALID_STATUS');
+  }
+
+  const activeCount = await requestRepository.countActiveRequestsForDelivery(delivery.id);
+  if (activeCount >= MAX_TRAVELER_REQUESTS_PER_DELIVERY) {
+    throw new AppError(
+      `You can request at most ${MAX_TRAVELER_REQUESTS_PER_DELIVERY} travelers for this delivery`,
+      400,
+      'REQUEST_LIMIT'
+    );
   }
 
   const trip = await loadTripByIdOrPublicId(tripIdOrPublic);
@@ -232,10 +244,16 @@ export async function markSenderRequestsReadForTrip(travelerId, tripIdOrPublicId
 }
 
 export async function acceptSenderRequest(travelerId, requestId) {
-  const row = await requestRepository.respondToSenderRequest(requestId, travelerId, 'accepted');
-  if (!row) throw new AppError('Sender request not found', 404, 'NOT_FOUND');
-  const full = await requestRepository.findRequestForTraveler(requestId, travelerId);
-  return mapSenderRequest(full || row);
+  const request = await requestRepository.findPendingRequestForTraveler(
+    requestId,
+    travelerId
+  );
+  if (!request) throw new AppError('Sender request not found', 404, 'NOT_FOUND');
+
+  const counterOfferService = await import('./trip_counter_offer.service.js');
+  return counterOfferService.createOrUpdateCounterOffer(travelerId, requestId, {
+    amount: Number(request.max_budget),
+  });
 }
 
 export async function declineSenderRequest(travelerId, requestId) {

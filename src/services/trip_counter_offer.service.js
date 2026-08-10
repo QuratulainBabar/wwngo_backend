@@ -255,10 +255,18 @@ async function onCounterOfferAccepted(mapped, rawRow) {
   const tripId = mapped.tripId || rawRow.trip_id;
   const amount = Number(mapped.amount) || Number(rawRow.amount) || 0;
 
+  await pool.query(
+    `UPDATE deliveries
+     SET traveler_id = $2, trip_id = $3, bid_amount = $4, updated_at = NOW()
+     WHERE id = $1`,
+    [deliveryId, travelerId, tripId, amount]
+  );
+
   await escrowService.holdEscrowForDelivery({
     senderId,
     deliveryPublicId,
     amountDollars: amount,
+    stripePaymentMethodId: null,
   });
 
   const timerService = await import('./timer.service.js');

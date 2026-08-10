@@ -91,6 +91,18 @@ export async function countPendingRequestsForTraveler(travelerId) {
   return Number(rows[0]?.count) || 0;
 }
 
+/** Pending sender requests for a delivery (max 2 travelers per delivery). */
+export async function countActiveRequestsForDelivery(deliveryId) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM trip_sender_requests
+     WHERE delivery_id = $1
+       AND status IN ('pending', 'accepted')`,
+    [deliveryId]
+  );
+  return Number(rows[0]?.count) || 0;
+}
+
 /** Unread = pending requests the traveler has not opened yet. */
 export async function countUnreadRequestsForTraveler(travelerId) {
   const { rows } = await pool.query(

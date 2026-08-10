@@ -2,11 +2,81 @@ import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
 import * as walletRepo from '../repositories/wallet.repository.js';
 import * as stripeService from './stripe.service.js';
-
-const PLATFORM_FEE_CENTS = 200; // $2 platform fee
+import {
+  senderPaysReceiverFee,
+  senderPlatformFeeCents,
+  receiverPlatformFeeCents,
+  travelerPlatformFeeCents,
+  travelerHandoffFeeCents,
+} from '../utils/fees.js';
 
 function dollarsToCents(amount) {
   return Math.round(Number(amount) * 100);
+}
+
+/**
+ * Charge wallet; optional mock card fallback tops up shortfall when Stripe is not configured.
+ */
+export async function chargeWalletOrCard({
+  userId,
+  role,
+  amountCents,
+  type = 'platform_fee',
+  description,
+  shipmentId = null,
+  stripePaymentMethodId = null,
+}) {
+  const cents = Number(amountCents);
+  if (cents <= 0) return { charged: false, amountCents: 0 };
+
+  const wallet = await walletRepo.getWallet(userId, role);
+  const available = Number(wallet.available_cents);
+  const shortfall = cents - available;
+
+  if (shortfall > 0) {
+    if (stripePaymentMethodId && stripeService.isConfigured()) {
+      const intent = await stripeService.createPaymentIntent({
+        amountCents: shortfall,
+        customerId: userId,
+        metadata: { purpose: 'fee_shortfall', userId, role, shipmentId: shipmentId || '' },
+      });
+      if (intent.status !== 'succeeded' && !intent.mock) {
+        throw new AppError('Card payment failed for platform fee', 402, 'PAYMENT_FAILED');
+      }
+    }
+    await walletRepo.appendLedgerEntry({
+      userId,
+      role,
+      type: 'top_up',
+      amountCents: shortfall,
+      availableDeltaCents: shortfall,
+      description: 'Card fallback for platform fee',
+      shipmentId,
+      hiddenFromHistory: true,
+    });
+  }
+
+  await walletRepo.appendLedgerEntry({
+    userId,
+    role,
+    type,
+    amountCents: cents,
+    availableDeltaCents: -cents,
+    description,
+    shipmentId,
+  });
+
+  return { charged: true, amountCents: cents };
+}
+
+async function getDeliveryRow(publicId) {
+  const { rows } = await pool.query(`SELECT * FROM deliveries WHERE public_id = $1`, [publicId]);
+  return rows[0] || null;
+}
+
+async function hasPlatformFeePaid(userId, role, shipmentId, label) {
+  const desc = `${label} for ${shipmentId}`;
+  return walletRepo.hasLedgerDescription(userId, desc);
 }
 
 /**
@@ -32,55 +102,108 @@ export async function holdEscrowForDelivery({
     };
   }
 
+  const delivery = await getDeliveryRow(deliveryPublicId);
+  if (!delivery) {
+    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+  }
+
   let stripePaymentIntentId = null;
-  if (stripeService.isConfigured() && stripePaymentMethodId) {
-    const intent = await stripeService.createPaymentIntent({
-      amountCents,
-      customerId: senderId,
-      metadata: { shipmentId: deliveryPublicId },
-    });
-    stripePaymentIntentId = intent.id;
-  }
-
-  if (!stripePaymentIntentId) {
-    await walletRepo.appendLedgerEntry({
-      userId: senderId,
-      role: 'sender',
-      type: 'escrow_hold',
-      amountCents,
-      availableDeltaCents: -amountCents,
-      escrowDeltaCents: amountCents,
-      description: `Escrow hold for ${deliveryPublicId}`,
-      shipmentId: deliveryPublicId,
-    });
-  }
-
-  await pool.query(
-    `INSERT INTO shipment_escrows (shipment_id, user_id, role, amount_cents, status, stripe_payment_intent_id)
-     VALUES ($1, $2, 'sender', $3, 'held', $4)
-     ON CONFLICT (shipment_id) DO UPDATE SET
-       amount_cents = EXCLUDED.amount_cents,
-       status = 'held',
-       stripe_payment_intent_id = COALESCE(EXCLUDED.stripe_payment_intent_id, shipment_escrows.stripe_payment_intent_id),
-       updated_at = NOW()`,
-    [deliveryPublicId, senderId, amountCents, stripePaymentIntentId]
-  );
-
   try {
-    await walletRepo.appendLedgerEntry({
+    if (stripeService.isConfigured() && stripePaymentMethodId) {
+      const intent = await stripeService.createPaymentIntent({
+        amountCents,
+        customerId: senderId,
+        metadata: { shipmentId: deliveryPublicId },
+      });
+      stripePaymentIntentId = intent.id;
+    } else {
+      const wallet = await walletRepo.getWallet(senderId, 'sender');
+      const available = Number(wallet.available_cents);
+      const shortfall = amountCents - available;
+      if (shortfall > 0) {
+        await walletRepo.appendLedgerEntry({
+          userId: senderId,
+          role: 'sender',
+          type: 'top_up',
+          amountCents: shortfall,
+          availableDeltaCents: shortfall,
+          description: 'Card fallback for escrow',
+          shipmentId: deliveryPublicId,
+          hiddenFromHistory: true,
+        });
+      }
+      await walletRepo.appendLedgerEntry({
+        userId: senderId,
+        role: 'sender',
+        type: 'escrow_hold',
+        amountCents,
+        availableDeltaCents: -amountCents,
+        escrowDeltaCents: amountCents,
+        description: `Escrow hold for ${deliveryPublicId}`,
+        shipmentId: deliveryPublicId,
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO shipment_escrows (shipment_id, user_id, role, amount_cents, status, stripe_payment_intent_id)
+       VALUES ($1, $2, 'sender', $3, 'held', $4)
+       ON CONFLICT (shipment_id) DO UPDATE SET
+         amount_cents = EXCLUDED.amount_cents,
+         status = 'held',
+         stripe_payment_intent_id = COALESCE(EXCLUDED.stripe_payment_intent_id, shipment_escrows.stripe_payment_intent_id),
+         updated_at = NOW()`,
+      [deliveryPublicId, senderId, amountCents, stripePaymentIntentId]
+    );
+
+    const paysReceiver = senderPaysReceiverFee(delivery);
+    const category = delivery.parcel_category;
+    const senderFee = senderPlatformFeeCents(category, paysReceiver);
+    const receiverFee = receiverPlatformFeeCents(category, paysReceiver);
+    const travelerId = delivery.traveler_id;
+    const receiverId = delivery.receiver_id;
+    const travelerFee = travelerId ? travelerPlatformFeeCents(category) : 0;
+
+    await chargeWalletOrCard({
       userId: senderId,
       role: 'sender',
-      type: 'platform_fee',
-      amountCents: PLATFORM_FEE_CENTS,
-      availableDeltaCents: -PLATFORM_FEE_CENTS,
+      amountCents: senderFee,
       description: `Platform fee for ${deliveryPublicId}`,
       shipmentId: deliveryPublicId,
+      stripePaymentMethodId,
     });
-  } catch (err) {
-    if (err.code !== 'INSUFFICIENT_BALANCE') throw err;
-  }
 
-  return { shipmentId: deliveryPublicId, amountCents, status: 'held', stripePaymentIntentId };
+    if (receiverId && receiverFee > 0) {
+      await chargeWalletOrCard({
+        userId: receiverId,
+        role: 'receiver',
+        amountCents: receiverFee,
+        description: `Platform fee for ${deliveryPublicId}`,
+        shipmentId: deliveryPublicId,
+      });
+    }
+
+    if (travelerId && travelerFee > 0) {
+      await chargeWalletOrCard({
+        userId: travelerId,
+        role: 'traveler',
+        amountCents: travelerFee,
+        description: `Platform fee for ${deliveryPublicId}`,
+        shipmentId: deliveryPublicId,
+      });
+    }
+
+    return { shipmentId: deliveryPublicId, amountCents, status: 'held', stripePaymentIntentId };
+  } catch (err) {
+    await refundEscrowForDelivery(deliveryPublicId, 'Booking failed — escrow reversed').catch(() => {});
+    if (err.code === 'INSUFFICIENT_BALANCE') {
+      throw new AppError(
+        'Insufficient wallet balance. Platform fees could not be collected; booking was not created.',
+        403,
+        'INSUFFICIENT_WALLET'
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -165,23 +288,31 @@ export async function refundEscrowForDelivery(deliveryPublicId, reason = 'Cancel
   return { refunded: true, amountCents };
 }
 
-/** Charge traveler $2 fee on NFC checkpoint 1. */
-export async function chargeTravelerHandoffFee(travelerId, deliveryPublicId) {
-  const feeCents = 200;
+/** Traveler handoff fee at NFC checkpoint 1 (skip if already paid at booking). */
+export async function chargeTravelerHandoffFee(travelerId, deliveryPublicId, parcelCategory) {
+  const alreadyPaid = await hasPlatformFeePaid(
+    travelerId,
+    'traveler',
+    deliveryPublicId,
+    'Platform fee'
+  );
+  if (alreadyPaid) {
+    return { charged: false, reason: 'already_paid' };
+  }
+
+  const feeCents = travelerHandoffFeeCents(parcelCategory);
   try {
-    await walletRepo.appendLedgerEntry({
+    await chargeWalletOrCard({
       userId: travelerId,
       role: 'traveler',
-      type: 'platform_fee',
       amountCents: feeCents,
-      availableDeltaCents: -feeCents,
       description: `Handoff fee for ${deliveryPublicId}`,
       shipmentId: deliveryPublicId,
     });
     return { charged: true, feeCents };
   } catch (err) {
-    if (err.code === 'INSUFFICIENT_BALANCE') {
-      throw new AppError('Traveler wallet needs at least $2 for handoff fee', 403, 'INSUFFICIENT_WALLET');
+    if (err.code === 'INSUFFICIENT_BALANCE' || err.code === 'INSUFFICIENT_WALLET') {
+      throw new AppError('Traveler wallet needs sufficient balance for handoff fee', 403, 'INSUFFICIENT_WALLET');
     }
     throw err;
   }

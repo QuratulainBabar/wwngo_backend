@@ -1,8 +1,9 @@
 import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
 import * as walletRepo from '../repositories/wallet.repository.js';
+import { minWalletCentsForRole } from '../utils/fees.js';
 
-export const MIN_WALLET_RESERVE_CENTS = 200; // $2.00
+export const MIN_WALLET_RESERVE_CENTS = 200; // $2.00 default (sender/receiver)
 
 export async function requireKycApproved(req, _res, next) {
   try {
@@ -33,11 +34,12 @@ export async function requireKycApproved(req, _res, next) {
 export function requireWalletMinimum(role = 'traveler') {
   return async (req, _res, next) => {
     try {
+      const minCents = minWalletCentsForRole(role);
       const wallet = await walletRepo.getWallet(req.user.id, role);
-      if (Number(wallet.available_cents) < MIN_WALLET_RESERVE_CENTS) {
+      if (Number(wallet.available_cents) < minCents) {
         return next(
           new AppError(
-            `Wallet must have at least $${(MIN_WALLET_RESERVE_CENTS / 100).toFixed(2)} available`,
+            `Wallet must have at least $${(minCents / 100).toFixed(2)} available`,
             403,
             'INSUFFICIENT_WALLET'
           )
