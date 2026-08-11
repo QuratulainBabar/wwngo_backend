@@ -103,6 +103,27 @@ export async function countActiveRequestsForDelivery(deliveryId) {
   return Number(rows[0]?.count) || 0;
 }
 
+/** Active traveler requests for a delivery (sender view). */
+export async function listActiveRequestsForDelivery(deliveryId) {
+  const { rows } = await pool.query(
+    `SELECT r.id,
+            r.status,
+            r.match_score,
+            r.created_at,
+            t.id AS trip_id,
+            t.public_id AS trip_public_id,
+            u.name AS traveler_name
+     FROM trip_sender_requests r
+     INNER JOIN trips t ON t.id = r.trip_id
+     INNER JOIN users u ON u.id = r.traveler_id
+     WHERE r.delivery_id = $1
+       AND r.status IN ('pending', 'accepted')
+     ORDER BY r.created_at DESC`,
+    [deliveryId]
+  );
+  return rows;
+}
+
 /** Unread = pending requests the traveler has not opened yet. */
 export async function countUnreadRequestsForTraveler(travelerId) {
   const { rows } = await pool.query(

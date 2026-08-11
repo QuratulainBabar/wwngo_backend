@@ -27,6 +27,11 @@ router.get(
   authenticate,
   deliveryController.listMatchingTravelers
 );
+router.get(
+  '/:id/traveler-requests',
+  authenticate,
+  deliveryController.listTravelerRequests
+);
 router.post(
   '/:id/request-traveler',
   authenticate,

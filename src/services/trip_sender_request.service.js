@@ -172,6 +172,20 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
   };
 }
 
+export async function listTravelerRequestsForDelivery(senderId, deliveryIdOrPublicId) {
+  const delivery = await loadSenderDelivery(senderId, deliveryIdOrPublicId);
+  const rows = await requestRepository.listActiveRequestsForDelivery(delivery.id);
+  return rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    matchScore: Number(row.match_score) || 0,
+    tripId: row.trip_id,
+    tripPublicId: row.trip_public_id,
+    travelerName: row.traveler_name || 'Traveler',
+    createdAt: row.created_at,
+  }));
+}
+
 export async function listSenderRequestsForTraveler(travelerId) {
   const rows = await requestRepository.listPendingRequestsForTraveler(travelerId);
   return rows.map(mapSenderRequest);

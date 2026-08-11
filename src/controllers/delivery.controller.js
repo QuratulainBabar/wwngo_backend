@@ -66,6 +66,19 @@ export const listMatchingTravelers = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /api/v1/deliveries/:id/traveler-requests
+ * Sender lists active traveler requests for a delivery.
+ */
+export const listTravelerRequests = asyncHandler(async (req, res) => {
+  const requestService = await import('../services/trip_sender_request.service.js');
+  const requests = await requestService.listTravelerRequestsForDelivery(
+    req.user.id,
+    req.params.id
+  );
+  res.json({ success: true, data: { requests } });
+});
+
+/**
  * POST /api/v1/deliveries/:id/request-traveler
  * Sender sends a parcel request to a matching traveler trip.
  */
