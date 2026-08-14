@@ -48,6 +48,21 @@ const REQUEST_SELECT = `
             FROM delivery_photos p
             WHERE p.delivery_id = d.id
           ) AS photo_count,
+          (
+            SELECT COALESCE(
+              json_agg(
+                json_build_object(
+                  'id', p.id,
+                  'file_path', p.file_path,
+                  'sortOrder', p.sort_order
+                )
+                ORDER BY p.sort_order ASC, p.created_at ASC
+              ),
+              '[]'::json
+            )
+            FROM delivery_photos p
+            WHERE p.delivery_id = d.id
+          ) AS photos,
           t.public_id AS trip_public_id,
           t.trip_type,
           t.from_city AS trip_from_city, t.to_city AS trip_to_city,

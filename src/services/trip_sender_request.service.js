@@ -26,11 +26,45 @@ function deliveryRoute(row) {
   return `${row.from_city || '—'} → ${row.to_city || '—'}`;
 }
 
+function photoPublicUrl(filePath) {
+  const normalized = String(filePath || '').replace(/\\/g, '/');
+  if (!normalized) return '';
+  if (normalized.startsWith('/uploads/')) return normalized;
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+    return normalized;
+  }
+  return `/uploads/${normalized.replace(/^uploads\//, '')}`;
+}
+
+function mapDeliveryPhotos(raw) {
+  let list = raw;
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((p) => {
+      const url = photoPublicUrl(p?.file_path || p?.url);
+      if (!url) return null;
+      return {
+        id: p.id,
+        url,
+        sortOrder: p.sortOrder != null ? Number(p.sortOrder) : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
 function mapSenderRequest(row) {
   const senderName = String(row.sender_name ?? '').trim() || 'Sender';
   const meetup = Array.isArray(row.preferred_meetup_locations)
     ? row.preferred_meetup_locations.filter(Boolean)
     : [];
+  const photos = mapDeliveryPhotos(row.photos);
   return {
     id: row.id,
     status: row.status,
@@ -51,7 +85,8 @@ function mapSenderRequest(row) {
     maxBudget: Number(row.max_budget) || 0,
     description: row.delivery_description || '',
     meetupLocations: meetup,
-    photoCount: Number(row.photo_count) || 0,
+    photoCount: photos.length || Number(row.photo_count) || 0,
+    photos,
     tripId: row.trip_id,
     tripPublicId: row.trip_public_id,
     senderId: row.sender_id,

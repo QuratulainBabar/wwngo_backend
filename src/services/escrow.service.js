@@ -15,7 +15,9 @@ function dollarsToCents(amount) {
 }
 
 /**
- * Charge wallet; optional mock card fallback tops up shortfall when Stripe is not configured.
+ * Charge wallet. When Stripe is configured and balance is short, creates a
+ * PaymentIntent and throws PAYMENT_REQUIRED (client completes Payment Sheet).
+ * Without Stripe keys, uses mock card ledger credit (dev/E2E).
  */
 export async function chargeWalletOrCard({
   userId,
@@ -24,26 +26,45 @@ export async function chargeWalletOrCard({
   type = 'platform_fee',
   description,
   shipmentId = null,
-  stripePaymentMethodId = null,
+  paymentIntentId = null,
+  allowPaymentRequired = true,
 }) {
   const cents = Number(amountCents);
   if (cents <= 0) return { charged: false, amountCents: 0 };
+
+  if (paymentIntentId) {
+    const walletService = await import('./wallet.service.js');
+    await walletService.confirmTopUp(userId, paymentIntentId);
+  }
 
   const wallet = await walletRepo.getWallet(userId, role);
   const available = Number(wallet.available_cents);
   const shortfall = cents - available;
 
   if (shortfall > 0) {
-    if (stripePaymentMethodId && stripeService.isConfigured()) {
-      const intent = await stripeService.createPaymentIntent({
-        amountCents: shortfall,
-        customerId: userId,
-        metadata: { purpose: 'fee_shortfall', userId, role, shipmentId: shipmentId || '' },
-      });
-      if (intent.status !== 'succeeded' && !intent.mock) {
-        throw new AppError('Card payment failed for platform fee', 402, 'PAYMENT_FAILED');
-      }
+    if (stripeService.isConfigured() && allowPaymentRequired) {
+      const walletService = await import('./wallet.service.js');
+      const payment = await walletService.createTopUpPaymentIntent(
+        userId,
+        role,
+        shortfall
+      );
+      // Retarget pending metadata purpose for escrow shortfall webhook.
+      throw new AppError(
+        'Card payment required to cover wallet shortfall',
+        402,
+        'PAYMENT_REQUIRED',
+        {
+          paymentIntentId: payment.paymentIntentId,
+          clientSecret: payment.clientSecret,
+          amountCents: shortfall,
+          role,
+          purpose: 'escrow_shortfall',
+        }
+      );
     }
+
+    // Dev / mock mode: invent card funds so E2E still works without Stripe keys.
     await walletRepo.appendLedgerEntry({
       userId,
       role,
@@ -81,12 +102,13 @@ async function hasPlatformFeePaid(userId, role, shipmentId, label) {
 
 /**
  * Lock sender funds in escrow when a bid/counter-offer is accepted.
+ * With Stripe configured, shortfalls require Payment Sheet (PAYMENT_REQUIRED).
  */
 export async function holdEscrowForDelivery({
   senderId,
   deliveryPublicId,
   amountDollars,
-  stripePaymentMethodId = null,
+  paymentIntentId = null,
 }) {
   const amountCents = dollarsToCents(amountDollars);
   if (amountCents <= 0) {
@@ -107,42 +129,68 @@ export async function holdEscrowForDelivery({
     throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   }
 
-  let stripePaymentIntentId = null;
-  try {
-    if (stripeService.isConfigured() && stripePaymentMethodId) {
-      const intent = await stripeService.createPaymentIntent({
-        amountCents,
-        customerId: senderId,
-        metadata: { shipmentId: deliveryPublicId },
-      });
-      stripePaymentIntentId = intent.id;
-    } else {
-      const wallet = await walletRepo.getWallet(senderId, 'sender');
-      const available = Number(wallet.available_cents);
-      const shortfall = amountCents - available;
-      if (shortfall > 0) {
-        await walletRepo.appendLedgerEntry({
-          userId: senderId,
-          role: 'sender',
-          type: 'top_up',
+  const paysReceiver = senderPaysReceiverFee(delivery);
+  const category = delivery.parcel_category;
+  const senderFee = senderPlatformFeeCents(category, paysReceiver);
+  const totalNeeded = amountCents + senderFee;
+
+  if (paymentIntentId) {
+    const walletService = await import('./wallet.service.js');
+    await walletService.confirmTopUp(senderId, paymentIntentId);
+  }
+
+  const wallet = await walletRepo.getWallet(senderId, 'sender');
+  const available = Number(wallet.available_cents);
+  const shortfall = totalNeeded - available;
+
+  if (shortfall > 0) {
+    if (stripeService.isConfigured()) {
+      const walletService = await import('./wallet.service.js');
+      // Patch purpose in createTopUpPaymentIntent metadata via dedicated helper
+      const payment = await createEscrowShortfallIntent(
+        senderId,
+        shortfall,
+        deliveryPublicId
+      );
+      throw new AppError(
+        'Insufficient wallet balance. Complete card payment to fund escrow and fees.',
+        402,
+        'PAYMENT_REQUIRED',
+        {
+          paymentIntentId: payment.paymentIntentId,
+          clientSecret: payment.clientSecret,
           amountCents: shortfall,
-          availableDeltaCents: shortfall,
-          description: 'Card fallback for escrow',
+          role: 'sender',
+          purpose: 'escrow_shortfall',
           shipmentId: deliveryPublicId,
-          hiddenFromHistory: true,
-        });
-      }
-      await walletRepo.appendLedgerEntry({
-        userId: senderId,
-        role: 'sender',
-        type: 'escrow_hold',
-        amountCents,
-        availableDeltaCents: -amountCents,
-        escrowDeltaCents: amountCents,
-        description: `Escrow hold for ${deliveryPublicId}`,
-        shipmentId: deliveryPublicId,
-      });
+        }
+      );
     }
+
+    await walletRepo.appendLedgerEntry({
+      userId: senderId,
+      role: 'sender',
+      type: 'top_up',
+      amountCents: shortfall,
+      availableDeltaCents: shortfall,
+      description: 'Card fallback for escrow',
+      shipmentId: deliveryPublicId,
+      hiddenFromHistory: true,
+    });
+  }
+
+  let stripePaymentIntentId = paymentIntentId || null;
+  try {
+    await walletRepo.appendLedgerEntry({
+      userId: senderId,
+      role: 'sender',
+      type: 'escrow_hold',
+      amountCents,
+      availableDeltaCents: -amountCents,
+      escrowDeltaCents: amountCents,
+      description: `Escrow hold for ${deliveryPublicId}`,
+      shipmentId: deliveryPublicId,
+    });
 
     await pool.query(
       `INSERT INTO shipment_escrows (shipment_id, user_id, role, amount_cents, status, stripe_payment_intent_id)
@@ -155,9 +203,6 @@ export async function holdEscrowForDelivery({
       [deliveryPublicId, senderId, amountCents, stripePaymentIntentId]
     );
 
-    const paysReceiver = senderPaysReceiverFee(delivery);
-    const category = delivery.parcel_category;
-    const senderFee = senderPlatformFeeCents(category, paysReceiver);
     const receiverFee = receiverPlatformFeeCents(category, paysReceiver);
     const travelerId = delivery.traveler_id;
     const receiverId = delivery.receiver_id;
@@ -169,7 +214,7 @@ export async function holdEscrowForDelivery({
       amountCents: senderFee,
       description: `Platform fee for ${deliveryPublicId}`,
       shipmentId: deliveryPublicId,
-      stripePaymentMethodId,
+      allowPaymentRequired: false,
     });
 
     if (receiverId && receiverFee > 0) {
@@ -179,6 +224,7 @@ export async function holdEscrowForDelivery({
         amountCents: receiverFee,
         description: `Platform fee for ${deliveryPublicId}`,
         shipmentId: deliveryPublicId,
+        allowPaymentRequired: false,
       });
     }
 
@@ -189,6 +235,7 @@ export async function holdEscrowForDelivery({
         amountCents: travelerFee,
         description: `Platform fee for ${deliveryPublicId}`,
         shipmentId: deliveryPublicId,
+        allowPaymentRequired: false,
       });
     }
 
@@ -204,6 +251,37 @@ export async function holdEscrowForDelivery({
     }
     throw err;
   }
+}
+
+async function createEscrowShortfallIntent(userId, amountCents, shipmentId) {
+  const { pool } = await import('../db/pool.js');
+  const intent = await stripeService.createPaymentIntent({
+    amountCents,
+    customerId: userId,
+    metadata: {
+      purpose: 'escrow_shortfall',
+      userId,
+      role: 'sender',
+      amountCents: String(amountCents),
+      shipmentId: shipmentId || '',
+    },
+  });
+
+  await pool.query(
+    `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
+     VALUES ($1, 'sender', $2, $3)
+     ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+    [userId, amountCents, intent.id]
+  );
+
+  return {
+    paymentIntentId: intent.id,
+    clientSecret: intent.client_secret,
+    amountCents,
+    role: 'sender',
+    requiresPayment: true,
+    mock: Boolean(intent.mock),
+  };
 }
 
 /**

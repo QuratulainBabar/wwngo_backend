@@ -228,6 +228,74 @@ export async function completeTopUpFromPaymentIntent(paymentIntentId) {
 }
 
 /**
+ * Client-side confirm after Payment Sheet (covers local/dev without webhook).
+ */
+export async function confirmTopUp(userId, paymentIntentId) {
+  const intentId = String(paymentIntentId || '').trim();
+  if (!intentId) {
+    throw new AppError('paymentIntentId is required', 400, 'VALIDATION_ERROR');
+  }
+
+  const stripeService = await import('./stripe.service.js');
+  const intent = await stripeService.retrievePaymentIntent(intentId);
+  if (!intent) {
+    throw new AppError('Payment intent not found', 404, 'NOT_FOUND');
+  }
+
+  const metaUser = intent.metadata?.userId;
+  if (metaUser && metaUser !== userId) {
+    throw new AppError('Payment does not belong to this user', 403, 'FORBIDDEN');
+  }
+
+  if (intent.status !== 'succeeded' && !intent.mock) {
+    throw new AppError(
+      `Payment is ${intent.status}. Complete card payment first.`,
+      402,
+      'PAYMENT_INCOMPLETE'
+    );
+  }
+
+  const result = await completeTopUpFromPaymentIntent(intentId);
+  if (!result.credited) {
+    // Already credited via webhook — return current wallet for the role on the PI.
+    const role = intent.metadata?.role || 'sender';
+    const wallet = await walletRepo.getWallet(userId, role);
+    return {
+      credited: false,
+      alreadyCredited: true,
+      ...mapWallet(wallet),
+    };
+  }
+
+  return {
+    credited: true,
+    ...result.wallet,
+    entry: result.entry,
+  };
+}
+
+export function getPaymentsConfig() {
+  // sync wrapper unused — prefer getPaymentsConfigAsync
+  return {
+    stripeEnabled: false,
+    publishableKey: null,
+    currency: 'USD',
+    minimumWithdrawalCents: MINIMUM_WITHDRAWAL_CENTS,
+  };
+}
+
+export async function getPaymentsConfigAsync() {
+  const stripeService = await import('./stripe.service.js');
+  const enabled = stripeService.isConfigured();
+  return {
+    stripeEnabled: enabled,
+    publishableKey: enabled ? stripeService.publishableKey() : null,
+    currency: 'USD',
+    minimumWithdrawalCents: MINIMUM_WITHDRAWAL_CENTS,
+  };
+}
+
+/**
  * Debit available balance; uses Stripe Connect transfer when account is linked.
  */
 export async function withdraw(userId, role, amountCents) {

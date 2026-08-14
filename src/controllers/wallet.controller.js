@@ -52,6 +52,19 @@ export const topUp = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data });
 });
 
+export const confirmTopUp = asyncHandler(async (req, res) => {
+  const data = await walletService.confirmTopUp(
+    req.user.id,
+    req.body.paymentIntentId
+  );
+  res.json({ success: true, data });
+});
+
+export const getPaymentsConfig = asyncHandler(async (_req, res) => {
+  const data = await walletService.getPaymentsConfigAsync();
+  res.json({ success: true, data });
+});
+
 /**
  * POST /api/v1/wallet/withdraw
  * body: { role, amountCents }

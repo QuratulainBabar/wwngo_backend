@@ -30,8 +30,42 @@ function deliveryRoute(row) {
   return `${row.from_city || '—'} → ${row.to_city || '—'}`;
 }
 
+function photoPublicUrl(filePath) {
+  const normalized = String(filePath || '').replace(/\\/g, '/');
+  if (!normalized) return '';
+  if (normalized.startsWith('/uploads/')) return normalized;
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+    return normalized;
+  }
+  return `/uploads/${normalized.replace(/^uploads\//, '')}`;
+}
+
+function mapDeliveryPhotos(raw) {
+  let list = raw;
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((p) => {
+      const url = photoPublicUrl(p?.file_path || p?.url);
+      if (!url) return null;
+      return {
+        id: p.id,
+        url,
+        sortOrder: p.sortOrder != null ? Number(p.sortOrder) : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
 export function mapCounterOffer(row) {
   const senderName = String(row.sender_name ?? '').trim() || 'Sender';
+  const photos = mapDeliveryPhotos(row.photos);
   return {
     id: row.id,
     requestId: row.sender_request_id,
@@ -47,7 +81,8 @@ export function mapCounterOffer(row) {
     destinationCountry: row.destination_country,
     travelDate: formatDateOnly(row.delivery_travel_date),
     maxBudget: Number(row.max_budget) || 0,
-    photoCount: Number(row.photo_count) || 0,
+    photoCount: photos.length || Number(row.photo_count) || 0,
+    photos,
     tripId: row.trip_id,
     tripPublicId: row.trip_public_id,
     senderId: row.sender_id,
@@ -63,6 +98,7 @@ export function mapCounterOffer(row) {
 /** Sender-facing counter offer payload (includes traveler profile fields). */
 export function mapCounterOfferForSender(row) {
   const travelerName = String(row.traveler_name ?? '').trim() || 'Traveler';
+  const photos = mapDeliveryPhotos(row.photos);
   return {
     id: row.id,
     requestId: row.sender_request_id,
@@ -78,7 +114,8 @@ export function mapCounterOfferForSender(row) {
     destinationCountry: row.destination_country,
     travelDate: formatDateOnly(row.delivery_travel_date),
     maxBudget: Number(row.max_budget) || 0,
-    photoCount: Number(row.photo_count) || 0,
+    photoCount: photos.length || Number(row.photo_count) || 0,
+    photos,
     tripId: row.trip_id,
     tripPublicId: row.trip_public_id,
     travelerId: row.traveler_id,
@@ -199,7 +236,7 @@ export async function getCounterOfferForSenderByDelivery(
   return mapCounterOfferForSender(row);
 }
 
-async function respondToCounterOffer(senderId, offerId, status) {
+async function respondToCounterOffer(senderId, offerId, status, options = {}) {
   const existing = await offerRepository.findOfferForSender(offerId, senderId);
   if (!existing) {
     throw new AppError('Counter offer not found', 404, 'NOT_FOUND');
@@ -229,9 +266,19 @@ async function respondToCounterOffer(senderId, offerId, status) {
   const mapped = mapCounterOfferForSender(full || { ...existing, ...updated });
 
   if (status === 'accepted') {
-    await onCounterOfferAccepted(mapped, existing).catch((err) => {
-      console.error('[counter-offer] accept side-effects failed:', err?.message || err);
-    });
+    try {
+      await onCounterOfferAccepted(mapped, existing, options);
+    } catch (err) {
+      // Roll back accept if escrow/payment failed so sender can retry.
+      await offerRepository
+        .updateOfferStatusForSender({
+          offerId,
+          senderId,
+          status: existing.status,
+        })
+        .catch(() => {});
+      throw err;
+    }
     await notifyTravelerCounterOfferAccepted(mapped, existing).catch((err) => {
       console.error(
         '[counter-offer] notify traveler of accept failed:',
@@ -243,7 +290,7 @@ async function respondToCounterOffer(senderId, offerId, status) {
   return mapped;
 }
 
-async function onCounterOfferAccepted(mapped, rawRow) {
+async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
   const { transitionDelivery } = await import('./delivery_state.service.js');
   const escrowService = await import('./escrow.service.js');
   const chatRepository = await import('../repositories/chat.repository.js');
@@ -266,7 +313,7 @@ async function onCounterOfferAccepted(mapped, rawRow) {
     senderId,
     deliveryPublicId,
     amountDollars: amount,
-    stripePaymentMethodId: null,
+    paymentIntentId: options.paymentIntentId || null,
   });
 
   const timerService = await import('./timer.service.js');
@@ -323,8 +370,8 @@ async function notifyTravelerCounterOfferAccepted(mapped, rawRow) {
   );
 }
 
-export async function acceptCounterOfferForSender(senderId, offerId) {
-  return respondToCounterOffer(senderId, offerId, 'accepted');
+export async function acceptCounterOfferForSender(senderId, offerId, options = {}) {
+  return respondToCounterOffer(senderId, offerId, 'accepted', options);
 }
 
 export async function rejectCounterOfferForSender(senderId, offerId) {

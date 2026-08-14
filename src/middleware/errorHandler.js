@@ -8,6 +8,7 @@ export function errorHandler(err, _req, res, _next) {
       error: {
         code: err.code,
         message: err.message,
+        ...(err.details ? { details: err.details } : {}),
       },
     });
   }

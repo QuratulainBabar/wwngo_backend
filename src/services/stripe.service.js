@@ -6,6 +6,10 @@ export function isConfigured() {
   return Boolean(env.stripe?.secretKey);
 }
 
+export function publishableKey() {
+  return env.stripe?.publishableKey || null;
+}
+
 async function getStripe() {
   if (!isConfigured()) return null;
   if (!stripe) {
@@ -18,7 +22,12 @@ async function getStripe() {
 export async function createPaymentIntent({ amountCents, customerId, metadata = {} }) {
   const s = await getStripe();
   if (!s) {
-    return { id: `mock_pi_${Date.now()}`, status: 'succeeded', mock: true };
+    return {
+      id: `mock_pi_${Date.now()}`,
+      status: 'succeeded',
+      client_secret: null,
+      mock: true,
+    };
   }
   return s.paymentIntents.create({
     amount: amountCents,
@@ -26,6 +35,19 @@ export async function createPaymentIntent({ amountCents, customerId, metadata = 
     metadata: { ...metadata, userId: customerId },
     automatic_payment_methods: { enabled: true },
   });
+}
+
+export async function retrievePaymentIntent(paymentIntentId) {
+  const s = await getStripe();
+  if (!s) {
+    return {
+      id: paymentIntentId,
+      status: 'succeeded',
+      mock: true,
+      metadata: {},
+    };
+  }
+  return s.paymentIntents.retrieve(paymentIntentId);
 }
 
 export async function createConnectAccount({ email, userId }) {
@@ -58,7 +80,7 @@ export async function createConnectAccountLink(accountId, { refreshUrl, returnUr
 
 export async function getConnectAccount(accountId) {
   const s = await getStripe();
-  if (!s) return { id: accountId, charges_enabled: false, mock: true };
+  if (!s) return { id: accountId, charges_enabled: false, payouts_enabled: false, mock: true };
   return s.accounts.retrieve(accountId);
 }
 
@@ -84,7 +106,8 @@ export async function handleWebhook(rawBody, signature) {
 
   if (event.type === 'payment_intent.succeeded') {
     const intent = event.data.object;
-    if (intent.metadata?.purpose === 'wallet_top_up') {
+    const purpose = intent.metadata?.purpose;
+    if (purpose === 'wallet_top_up' || purpose === 'escrow_shortfall') {
       const walletService = await import('./wallet.service.js');
       await walletService.completeTopUpFromPaymentIntent(intent.id);
     }

@@ -15,6 +15,21 @@ const OFFER_SELECT = `
            FROM delivery_photos p
            WHERE p.delivery_id = d.id
          ) AS photo_count,
+         (
+           SELECT COALESCE(
+             json_agg(
+               json_build_object(
+                 'id', p.id,
+                 'file_path', p.file_path,
+                 'sortOrder', p.sort_order
+               )
+               ORDER BY p.sort_order ASC, p.created_at ASC
+             ),
+             '[]'::json
+           )
+           FROM delivery_photos p
+           WHERE p.delivery_id = d.id
+         ) AS photos,
          t.public_id AS trip_public_id,
          u.name AS sender_name,
          u.rating AS sender_rating
@@ -35,6 +50,21 @@ const SENDER_OFFER_SELECT = `
            FROM delivery_photos p
            WHERE p.delivery_id = d.id
          ) AS photo_count,
+         (
+           SELECT COALESCE(
+             json_agg(
+               json_build_object(
+                 'id', p.id,
+                 'file_path', p.file_path,
+                 'sortOrder', p.sort_order
+               )
+               ORDER BY p.sort_order ASC, p.created_at ASC
+             ),
+             '[]'::json
+           )
+           FROM delivery_photos p
+           WHERE p.delivery_id = d.id
+         ) AS photos,
          t.public_id AS trip_public_id,
          traveler.name AS traveler_name,
          traveler.rating AS traveler_rating,

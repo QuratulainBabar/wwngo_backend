@@ -173,7 +173,8 @@ export const acceptSenderCounterOffer = asyncHandler(async (req, res) => {
   const offerService = await import('../services/trip_counter_offer.service.js');
   const data = await offerService.acceptCounterOfferForSender(
     req.user.id,
-    req.params.offerId
+    req.params.offerId,
+    { paymentIntentId: req.body?.paymentIntentId || null }
   );
   res.json({ success: true, data });
 });

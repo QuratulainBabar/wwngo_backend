@@ -21,6 +21,8 @@ const amountCentsBody = body('amountCents')
 
 router.use(authenticate);
 
+router.get('/payments/config', walletController.getPaymentsConfig);
+
 router.get('/', roleQuery, validate, walletController.getWallet);
 
 router.post(
@@ -49,6 +51,13 @@ router.post(
   amountCentsBody,
   validate,
   walletController.topUp
+);
+
+router.post(
+  '/top-up/confirm',
+  body('paymentIntentId').isString().trim().notEmpty(),
+  validate,
+  walletController.confirmTopUp
 );
 
 router.post(
