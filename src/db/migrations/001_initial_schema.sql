@@ -1,6 +1,12 @@
 -- WWNGO initial schema (auth-focused; extensible for shipments, wallet, etc.)
 
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- pgcrypto is only needed on PostgreSQL 12 and older (for gen_random_uuid).
+-- Many shared hosts omit contrib modules; PG 13+ has gen_random_uuid built in.
+DO $$ BEGIN
+  CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+EXCEPTION
+  WHEN OTHERS THEN NULL;
+END $$;
 
 DO $$ BEGIN
   CREATE TYPE kyc_status AS ENUM ('pending', 'submitted', 'approved', 'rejected');
