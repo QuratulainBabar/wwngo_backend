@@ -1,5 +1,5 @@
 import { body } from 'express-validator';
-import { ALLOWED_COUNTRY_CODES } from '../config/env.js';
+import { isAllowedCountryCode } from '../config/env.js';
 import { ALLOWED_DIAL_CODES, normalizeDialCode } from '../utils/phone.js';
 import * as authService from '../services/auth.service.js';
 import { rotateRefreshToken } from '../services/token.service.js';
@@ -42,7 +42,7 @@ export const registerValidators = [
     .isLength({ min: 8 })
     .withMessage('Password must be at least 8 characters'),
   body('countryCode')
-    .isIn(ALLOWED_COUNTRY_CODES)
+    .custom((value) => isAllowedCountryCode(value))
     .withMessage('Invalid country code'),
   body('acceptedTerms')
     .custom((value) => value === true)
@@ -151,7 +151,7 @@ export const updateProfileValidators = [
   body('email').isEmail().withMessage('Enter a valid email address'),
   phoneFieldsValidator,
   body('countryCode')
-    .isIn(ALLOWED_COUNTRY_CODES)
+    .custom((value) => isAllowedCountryCode(value))
     .withMessage('Invalid country code'),
 ];
 

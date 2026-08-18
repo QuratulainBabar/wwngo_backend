@@ -171,16 +171,25 @@ export async function createTopUpPaymentIntent(userId, role, amountCents) {
   const stripeService = await import('./stripe.service.js');
   const { pool } = await import('../db/pool.js');
 
-  const intent = await stripeService.createPaymentIntent({
-    amountCents,
-    customerId: userId,
-    metadata: {
-      purpose: 'wallet_top_up',
-      userId,
-      role,
-      amountCents: String(amountCents),
-    },
-  });
+  let intent;
+  try {
+    intent = await stripeService.createPaymentIntent({
+      amountCents,
+      customerId: userId,
+      metadata: {
+        purpose: 'wallet_top_up',
+        userId,
+        role,
+        amountCents: String(amountCents),
+      },
+    });
+  } catch (err) {
+    throw new AppError(
+      err.message || 'Could not start Stripe payment',
+      502,
+      'STRIPE_ERROR'
+    );
+  }
 
   await pool.query(
     `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
@@ -407,12 +416,27 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet' } 
     );
   }
 
-  const base = env.appPublicUrl.replace(/\/$/, '');
-  const returnUrl = `${base}${returnPath}`;
-  const link = await stripeService.createConnectAccountLink(accountId, {
-    refreshUrl: `${returnUrl}?connect=refresh`,
-    returnUrl: `${returnUrl}?connect=done`,
-  });
+  const path = returnPath?.startsWith('/') ? returnPath : `/${returnPath || 'wallet'}`;
+  const configured = String(env.appPublicUrl || '').replace(/\/$/, '');
+  // Account Links require HTTPS except localhost; LAN HTTP IPs are rejected by Stripe.
+  const base = /^https:\/\//i.test(configured) ||
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configured)
+    ? configured
+    : 'https://wango.toolkitpro.cloud';
+  const returnUrl = `${base}${path}`;
+  let link;
+  try {
+    link = await stripeService.createConnectAccountLink(accountId, {
+      refreshUrl: `${returnUrl}?connect=refresh`,
+      returnUrl: `${returnUrl}?connect=done`,
+    });
+  } catch (err) {
+    throw new AppError(
+      err.message || 'Could not start Stripe Connect onboarding',
+      502,
+      'STRIPE_ERROR'
+    );
+  }
 
   return {
     accountId,

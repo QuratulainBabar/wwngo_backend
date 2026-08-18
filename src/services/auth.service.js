@@ -1,6 +1,6 @@
 import { pool } from '../db/pool.js';
 import crypto from 'crypto';
-import { ALLOWED_COUNTRY_CODES, env } from '../config/env.js';
+import { isAllowedCountryCode, normalizeCountryCode, env } from '../config/env.js';
 import { AppError } from '../utils/errors.js';
 import { hashPassword, verifyPassword } from '../utils/password.js';
 import { verifyTokenHash } from '../utils/password.js';
@@ -174,7 +174,8 @@ export async function registerUser({
     throw new AppError('You must accept the Terms & Privacy Policy', 400, 'TERMS_REQUIRED');
   }
 
-  if (!ALLOWED_COUNTRY_CODES.includes(countryCode)) {
+  const normalizedCountry = normalizeCountryCode(countryCode);
+  if (!isAllowedCountryCode(normalizedCountry)) {
     throw new AppError('Invalid country code', 400, 'INVALID_COUNTRY');
   }
 
@@ -199,7 +200,7 @@ export async function registerUser({
         email_verified, phone_verified
       ) VALUES ($1, $2, $3, $4, $5, NOW(), FALSE, FALSE)
       RETURNING ${USER_COLUMNS}`,
-      [name.trim(), normalizedEmail, normalizedPhone, passwordHash, countryCode]
+      [name.trim(), normalizedEmail, normalizedPhone, passwordHash, normalizedCountry]
     );
 
     const user = mapUser(rows[0]);
@@ -389,7 +390,8 @@ export async function updateUserProfile(userId, { name, email, phone, dialCode, 
 
   assertAccountActive(userRow);
 
-  if (!ALLOWED_COUNTRY_CODES.includes(countryCode)) {
+  const normalizedCountry = normalizeCountryCode(countryCode);
+  if (!isAllowedCountryCode(normalizedCountry)) {
     throw new AppError('Invalid country code', 400, 'INVALID_COUNTRY');
   }
 
@@ -417,7 +419,7 @@ export async function updateUserProfile(userId, { name, email, phone, dialCode, 
        SET name = $1, email = $2, phone = $3, country_code = $4
        WHERE id = $5
        RETURNING ${USER_COLUMNS}`,
-      [trimmedName, normalizedEmail, normalizedPhone, countryCode, userId]
+      [trimmedName, normalizedEmail, normalizedPhone, normalizedCountry, userId]
     );
 
     return { user: mapUser(rows[0]), message: 'Profile updated' };

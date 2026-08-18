@@ -118,4 +118,25 @@ function cleanEnv(value) {
     .trim();
 }
 
-export const ALLOWED_COUNTRY_CODES = ['FR', 'US', 'GB', 'NG', 'AE', 'CA'];
+/**
+ * Optional launch-market allowlist via `ALLOWED_COUNTRY_CODES=FR,US,PK`.
+ * Empty / unset = any ISO-3166 alpha-2 (matches `users.country_code` CHECK).
+ */
+const rawAllowedCountries = cleanEnv(process.env.ALLOWED_COUNTRY_CODES);
+export const ALLOWED_COUNTRY_CODES = rawAllowedCountries
+  ? rawAllowedCountries
+      .split(',')
+      .map((code) => code.trim().toUpperCase())
+      .filter(Boolean)
+  : null;
+
+export function normalizeCountryCode(code) {
+  return String(code || '').trim().toUpperCase();
+}
+
+export function isAllowedCountryCode(code) {
+  const iso = normalizeCountryCode(code);
+  if (!/^[A-Z]{2}$/.test(iso)) return false;
+  if (!ALLOWED_COUNTRY_CODES || ALLOWED_COUNTRY_CODES.length === 0) return true;
+  return ALLOWED_COUNTRY_CODES.includes(iso);
+}
