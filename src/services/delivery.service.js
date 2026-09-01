@@ -10,6 +10,14 @@ import * as deliveryState from './delivery_state.service.js';
 import * as escrowService from './escrow.service.js';
 import { sendReceiverParcelRequestEmail } from './email.service.js';
 import { pool } from '../db/pool.js';
+import {
+  parsePaysReceiverFee,
+  resolvePlatformFees,
+  senderPaysReceiverFee,
+  receiverPlatformFeeCents,
+  minWalletCentsForReceiverAccept,
+} from '../utils/fees.js';
+import { labelsInSameArea } from '../utils/meetup_location_match.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const UPLOADS_ROOT = path.join(__dirname, '../../uploads');
@@ -79,34 +87,36 @@ function requireString(value, field) {
   return s;
 }
 
-function meetupBelongsToOrigin(meetupLabel, originCity) {
-  const city = String(originCity ?? '').trim().toLowerCase();
-  const label = String(meetupLabel ?? '').trim().toLowerCase();
-  if (!city || !label) return false;
-  return label.includes(city);
+function meetupBelongsToOrigin(meetupLabel, originCity, originCountryCode) {
+  return labelsInSameArea(meetupLabel, originCity, {
+    routeCountryCode: originCountryCode,
+  });
 }
 
-function assertMeetupsWithinOrigin(meetupLocations, originCity) {
+function assertMeetupsWithinOrigin(meetupLocations, originCity, originCountryCode) {
   const city = String(originCity ?? '').trim();
   if (!city) return;
   for (const loc of meetupLocations) {
-    if (!meetupBelongsToOrigin(loc, city)) {
+    if (!meetupBelongsToOrigin(loc, city, originCountryCode)) {
       throw new AppError(MEETUP_ORIGIN_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
     }
   }
 }
 
-function meetupBelongsToDestination(meetupLabel, destinationCity) {
-  const city = String(destinationCity ?? '').trim().toLowerCase();
-  const label = String(meetupLabel ?? '').trim().toLowerCase();
-  if (!city || !label) return false;
-  return label.includes(city);
+function meetupBelongsToDestination(meetupLabel, destinationCity, destinationCountryCode) {
+  return labelsInSameArea(meetupLabel, destinationCity, {
+    routeCountryCode: destinationCountryCode,
+  });
 }
 
-function assertMeetupWithinDestination(meetupLabel, destinationCity) {
+function assertMeetupWithinDestination(
+  meetupLabel,
+  destinationCity,
+  destinationCountryCode
+) {
   const city = String(destinationCity ?? '').trim();
   if (!city) return;
-  if (!meetupBelongsToDestination(meetupLabel, city)) {
+  if (!meetupBelongsToDestination(meetupLabel, city, destinationCountryCode)) {
     throw new AppError(MEETUP_DESTINATION_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
   }
 }
@@ -172,6 +182,7 @@ function mapDelivery(row, photos = []) {
     acknowledged: row.acknowledged,
     platformFee: Number(row.platform_fee),
     platformFeeShare: Number(row.platform_fee_share),
+    paysReceiverFee: senderPaysReceiverFee(row),
     receiverEmail: row.receiver_email,
     receiverPhone: row.receiver_phone,
     receiverMeetupLocation: row.receiver_meetup_location || null,
@@ -181,6 +192,7 @@ function mapDelivery(row, photos = []) {
     receiverPaymentDueAt: row.receiver_payment_due_at || null,
     receiverFeeCents: row.receiver_fee_cents != null ? Number(row.receiver_fee_cents) : 0,
     travelerId: row.traveler_id || null,
+    travelerName: row.traveler_name || null,
     bidAmount: row.bid_amount != null ? Number(row.bid_amount) : null,
     meetupLocation: row.meetup_location || null,
     chatUnlocked: Boolean(row.chat_unlocked),
@@ -271,6 +283,9 @@ function validateDeliveryFormBody(body, deliveryType) {
     );
   }
 
+  const paysReceiverFee = parsePaysReceiverFee(body);
+  const platformFees = resolvePlatformFees(parcelCategory, paysReceiverFee);
+
   const base = {
     deliveryType,
     travelDate,
@@ -284,12 +299,9 @@ function validateDeliveryFormBody(body, deliveryType) {
     receiverEmail,
     receiverPhone,
     receiverMeetupLocation,
-    platformFee: body.platformFee != null
-      ? toNumber(body.platformFee, 'platformFee')
-      : DEFAULT_PLATFORM_FEE,
-    platformFeeShare: body.platformFeeShare != null
-      ? toNumber(body.platformFeeShare, 'platformFeeShare')
-      : DEFAULT_PLATFORM_FEE_SHARE,
+    platformFee: platformFees.platformFee,
+    platformFeeShare: platformFees.platformFeeShare,
+    paysReceiverFee: platformFees.paysReceiverFee,
     fromCity: null,
     fromCode: null,
     toCity: null,
@@ -310,8 +322,16 @@ function validateDeliveryFormBody(body, deliveryType) {
       toCity,
       toCode: requireString(body.toCode, 'toCode').toUpperCase(),
     };
-    assertMeetupsWithinOrigin(preferredMeetupLocations, fromCity);
-    assertMeetupWithinDestination(receiverMeetupLocation, toCity);
+    assertMeetupsWithinOrigin(
+      preferredMeetupLocations,
+      fromCity,
+      payload.fromCode
+    );
+    assertMeetupWithinDestination(
+      receiverMeetupLocation,
+      toCity,
+      payload.toCode
+    );
     return payload;
   }
 
@@ -321,13 +341,17 @@ function validateDeliveryFormBody(body, deliveryType) {
   const destinationCountry = requireString(body.destinationCountry, 'destinationCountry');
   const destinationAirport = requireString(body.destinationAirport, 'destinationAirport');
   const destinationCity = String(body.destinationCity ?? '').trim();
+  const fromCode = String(body.fromCode ?? '').trim().toUpperCase();
+  const toCode = String(body.toCode ?? '').trim().toUpperCase();
   assertMeetupsWithinOrigin(
     preferredMeetupLocations,
-    originCity || originCountry
+    originCity || originAirport || originCountry,
+    fromCode
   );
   assertMeetupWithinDestination(
     receiverMeetupLocation,
-    destinationCity || destinationCountry
+    destinationCity || destinationAirport || destinationCountry,
+    toCode
   );
 
   return {
@@ -431,7 +455,7 @@ export async function createDelivery(senderId, body, files) {
       let mapped = mapDelivery(delivery, photos);
       const senderName = await loadSenderName(senderId);
 
-      // Link + notify matching receiver account FIRST so in-app alerts and
+      // Platform fees are collected when the sender pays (Pay Now) — not at post.
       // receiver lists update even if SMTP is slow/down (Flutter times out at 20s).
       try {
         const receiverUserId =
@@ -568,14 +592,55 @@ async function resolveUserContact(user) {
 }
 
 /**
- * GET list for authenticated user. role=receiver returns parcels addressed to them.
+ * GET list for authenticated user.
+ * role=receiver → incoming parcels; role=traveler → assigned bookings; else sender posts.
  */
 export async function listDeliveriesForUser(user, query = {}) {
   const role = String(query.role || 'sender').toLowerCase();
   if (role === 'receiver') {
     return listReceiverDeliveries(user, query);
   }
+  if (role === 'traveler') {
+    return listTravelerDeliveries(user.id, query);
+  }
   return listSenderDeliveries(user.id, query);
+}
+
+export async function listTravelerDeliveries(travelerId, query = {}) {
+  const limit = Math.min(Number(query.limit) || 50, 100);
+  const offset = Math.max(Number(query.offset) || 0, 0);
+  const rows = await deliveryRepository.listDeliveriesForTraveler(travelerId, {
+    limit,
+    offset,
+  });
+  const photos = await deliveryRepository.listPhotosForDeliveries(rows.map((r) => r.id));
+  const byDelivery = new Map();
+  for (const photo of photos) {
+    if (!byDelivery.has(photo.delivery_id)) byDelivery.set(photo.delivery_id, []);
+    byDelivery.get(photo.delivery_id).push(photo);
+  }
+  return rows.map((row) => mapDelivery(row, byDelivery.get(row.id) || []));
+}
+
+export async function getDeliveryForTraveler(travelerId, idOrPublicId) {
+  const looksLikeUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      idOrPublicId
+    );
+
+  const row = looksLikeUuid
+    ? await deliveryRepository.findDeliveryByIdForTraveler(idOrPublicId, travelerId)
+    : await deliveryRepository.findDeliveryByPublicIdForTraveler(
+        idOrPublicId,
+        travelerId
+      );
+
+  if (!row) {
+    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+  }
+
+  const photos = await deliveryRepository.listPhotosForDelivery(row.id);
+  return mapDelivery(row, photos);
 }
 
 export async function listReceiverDeliveries(user, query = {}) {
@@ -653,12 +718,20 @@ export async function getDeliveryForUser(user, idOrPublicId, query = {}) {
   if (role === 'receiver') {
     return getDeliveryForReceiver(user, idOrPublicId);
   }
+  if (role === 'traveler') {
+    return getDeliveryForTraveler(user.id, idOrPublicId);
+  }
 
-  // Try sender first, then receiver (deep links / shared IDs).
+  // Try sender first, then traveler, then receiver (deep links / shared IDs).
   try {
     return await getDeliveryForSender(user.id, idOrPublicId);
   } catch (err) {
-    if (err?.status !== 404) throw err;
+    if (err?.statusCode !== 404 && err?.status !== 404) throw err;
+  }
+  try {
+    return await getDeliveryForTraveler(user.id, idOrPublicId);
+  } catch (err) {
+    if (err?.statusCode !== 404 && err?.status !== 404) throw err;
     return getDeliveryForReceiver(user, idOrPublicId);
   }
 }
@@ -693,7 +766,7 @@ export async function getDeliveryForReceiver(user, idOrPublicId) {
   return mapDelivery(row, photos);
 }
 
-export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
+export async function acceptDeliveryAsReceiver(user, idOrPublicId, options = {}) {
   const delivery = await getDeliveryForReceiver(user, idOrPublicId);
   if (delivery.senderId === user.id) {
     throw new AppError(
@@ -709,7 +782,27 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId) {
     return delivery;
   }
 
-  const updated = await deliveryRepository.acceptDeliveryAsReceiver(delivery.id, user.id);
+  const paysReceiver = senderPaysReceiverFee(delivery);
+  const requiredCents = minWalletCentsForReceiverAccept(
+    delivery.parcelCategory,
+    paysReceiver
+  );
+
+  const walletRepo = await import('../repositories/wallet.repository.js');
+  const wallet = await walletRepo.getWallet(user.id, 'receiver');
+  if (Number(wallet.available_cents) < requiredCents) {
+    throw new AppError(
+      `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
+      403,
+      'INSUFFICIENT_WALLET'
+    );
+  }
+
+  const updated = await deliveryRepository.acceptDeliveryAsReceiver(
+    delivery.id,
+    user.id,
+    { receiverFeeCents: 0 }
+  );
   if (!updated) {
     throw new AppError('Unable to accept this request', 400, 'ACCEPT_FAILED');
   }
@@ -762,10 +855,10 @@ export async function declineDeliveryAsReceiver(user, idOrPublicId) {
   return mapDelivery({ ...updated, sender_name: delivery.senderName }, photos);
 }
 
-const RECEIVER_FEE_OPTIONS_CENTS = [0, 200, 400];
-
 /**
- * Receiver pays platform fee share ($0 / $2 / $4) after bid accepted.
+ * Receiver pays platform fee share ($0 / $2 / $4).
+ * Normally collected when the receiver accepts; this endpoint remains for
+ * legacy/backfill when acceptance happened without a fee charge.
  */
 export async function submitReceiverPayment(user, idOrPublicId, { feeCents } = {}) {
   const delivery = await getDeliveryForReceiver(user, idOrPublicId);
@@ -776,23 +869,40 @@ export async function submitReceiverPayment(user, idOrPublicId, { feeCents } = {
     throw new AppError('Payment is not required for this delivery state', 400, 'INVALID_STATUS');
   }
 
+  const paysReceiver = senderPaysReceiverFee(delivery);
+  const expectedCents = receiverPlatformFeeCents(delivery.parcelCategory, paysReceiver);
   const cents = Number(feeCents);
-  if (!RECEIVER_FEE_OPTIONS_CENTS.includes(cents)) {
-    throw new AppError('feeCents must be 0, 200, or 400', 400, 'VALIDATION_ERROR');
+  if (cents !== expectedCents) {
+    throw new AppError(
+      `feeCents must be ${expectedCents} for this delivery`,
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+  if (cents === 0) {
+    const { rows } = await pool.query(
+      `UPDATE deliveries
+       SET receiver_paid_at = COALESCE(receiver_paid_at, NOW()),
+           receiver_fee_cents = 0,
+           receiver_payment_due_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [delivery.id]
+    );
+    const updated = rows[0];
+    const photos = await deliveryRepository.listPhotosForDelivery(updated.id);
+    return mapDelivery({ ...updated, sender_name: delivery.senderName }, photos);
   }
 
-  const walletRepo = await import('../repositories/wallet.repository.js');
-  if (cents > 0) {
-    await walletRepo.appendLedgerEntry({
-      userId: user.id,
-      role: 'receiver',
-      type: 'platform_fee',
-      amountCents: cents,
-      availableDeltaCents: -cents,
-      description: `Receiver fee share for ${delivery.publicId}`,
-      shipmentId: delivery.publicId,
-    });
-  }
+  await escrowService.chargeWalletOrCard({
+    userId: user.id,
+    role: 'receiver',
+    amountCents: cents,
+    description: `Receiver platform fee for ${delivery.publicId}`,
+    shipmentId: delivery.publicId,
+    allowPaymentRequired: false,
+  });
 
   const { rows } = await pool.query(
     `UPDATE deliveries
@@ -869,6 +979,8 @@ export async function openDispute(user, idOrPublicId, { reason } = {}) {
     [delivery.id, user.id, text]
   );
 
+  await escrowService.freezeEscrowForDelivery(delivery.public_id).catch(() => {});
+
   return { dispute: rows[0], deliveryId: delivery.id, publicId: delivery.public_id };
 }
 
@@ -891,20 +1003,23 @@ function parseTravelDateForCancelCheck(travelDateStr) {
 }
 
 function assertSenderCanCancelBeforeTravel(travelDateStr) {
-  const travelDate = parseTravelDateForCancelCheck(travelDateStr);
-  if (!travelDate) {
-    throw new AppError('Invalid travel date on delivery', 400, 'VALIDATION_ERROR');
-  }
-  const now = new Date();
-  const msUntilTravel = travelDate.getTime() - now.getTime();
-  const hoursUntilTravel = msUntilTravel / (1000 * 60 * 60);
-  if (hoursUntilTravel < SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL) {
+  if (!isHoursUntilTravelAtLeast(travelDateStr, SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL)) {
     throw new AppError(
       `Cancellations must be made at least ${SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL} hours before travel`,
       400,
       'CANCEL_TOO_LATE'
     );
   }
+}
+
+function isHoursUntilTravelAtLeast(travelDateStr, minHours) {
+  const travelDate = parseTravelDateForCancelCheck(travelDateStr);
+  if (!travelDate) {
+    return false;
+  }
+  const msUntilTravel = travelDate.getTime() - Date.now();
+  const hoursUntilTravel = msUntilTravel / (1000 * 60 * 60);
+  return hoursUntilTravel >= minHours;
 }
 
 function parseRetainedPhotoIds(raw) {
@@ -1004,19 +1119,23 @@ export async function updateDeliveryForSender(senderId, idOrPublicId, body, file
 }
 
 /**
- * POST sender cancel — posted or pre-handoff accepted deliveries (with escrow refund).
+ * POST sender cancel — open listings (≥24h before travel) or booked shipments
+ * through collected (escrow always refunded; platform fees per 24h rule).
  */
 export async function cancelDeliveryForSender(senderId, idOrPublicId) {
   const delivery = await getDeliveryForSender(senderId, idOrPublicId);
 
-  const cancellable = [
-    'posted',
-    'waiting_receiver',
+  const openCancellable = ['posted', 'waiting_receiver'];
+  const bookingCancellable = [
     'bid_accepted',
     'matched',
     'ready_for_handoff',
+    'collected',
   ];
-  if (!cancellable.includes(delivery.status)) {
+  const isOpen = openCancellable.includes(delivery.status);
+  const isBooking = bookingCancellable.includes(delivery.status);
+
+  if (!isOpen && !isBooking) {
     throw new AppError(
       'This delivery cannot be cancelled at its current stage',
       400,
@@ -1024,7 +1143,17 @@ export async function cancelDeliveryForSender(senderId, idOrPublicId) {
     );
   }
 
-  assertSenderCanCancelBeforeTravel(delivery.travelDate);
+  if (isOpen) {
+    if (!parseTravelDateForCancelCheck(delivery.travelDate)) {
+      throw new AppError('Invalid travel date on delivery', 400, 'VALIDATION_ERROR');
+    }
+    assertSenderCanCancelBeforeTravel(delivery.travelDate);
+  }
+
+  const platformFeesRefundable = isHoursUntilTravelAtLeast(
+    delivery.travelDate,
+    SENDER_CANCEL_MIN_HOURS_BEFORE_TRAVEL
+  );
 
   await deliveryState.transitionDelivery({
     deliveryId: delivery.id,
@@ -1037,6 +1166,13 @@ export async function cancelDeliveryForSender(senderId, idOrPublicId) {
     delivery.publicId,
     'Sender cancelled delivery'
   );
+
+  let platformFeeRefund = { refunded: false, entries: [] };
+  if (platformFeesRefundable) {
+    platformFeeRefund = await escrowService.refundPlatformFeesForDelivery(
+      delivery.publicId
+    );
+  }
 
   const updated = await deliveryRepository.findDeliveryByIdForSender(
     delivery.id,
@@ -1072,5 +1208,6 @@ export async function cancelDeliveryForSender(senderId, idOrPublicId) {
   return {
     ...mapDelivery({ ...updated, sender_name: delivery.senderName }, photos),
     escrowRefund: refund,
+    platformFeesRefunded: platformFeesRefundable && platformFeeRefund.refunded,
   };
 }

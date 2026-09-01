@@ -21,12 +21,29 @@ export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   isDev: (process.env.NODE_ENV || 'development') !== 'production',
   databaseUrl: process.env.DATABASE_URL,
+  db: {
+    // Connection pool + timeouts. Defaults are tuned for a remote/managed
+    // Postgres; override via env on very small or very large instances.
+    poolMax: Number(process.env.DB_POOL_MAX) || 20,
+    idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS) || 30000,
+    connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS) || 8000,
+    // A single slow query can no longer hold a pooled connection forever.
+    statementTimeoutMillis: Number(process.env.DB_STATEMENT_TIMEOUT_MS) || 15000,
+    // TLS: on when DATABASE_SSL=true, off when false, otherwise auto-detected
+    // from a `sslmode=require` in the connection string.
+    ssl: (() => {
+      const raw = cleanEnv(process.env.DATABASE_SSL);
+      if (raw === 'true') return true;
+      if (raw === 'false') return false;
+      return /sslmode=require/i.test(process.env.DATABASE_URL || '');
+    })(),
+  },
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET,
     refreshSecret: process.env.JWT_REFRESH_SECRET,
     resetSecret: process.env.JWT_RESET_SECRET,
-    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '1d',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
     resetExpiresIn: process.env.JWT_RESET_EXPIRES_IN || '15m',
   },
   otp: {
@@ -105,6 +122,8 @@ export const env = {
   redisUrl: cleanEnv(process.env.REDIS_URL),
   fcm: {
     serverKey: cleanEnv(process.env.FCM_SERVER_KEY),
+    /** Path to Firebase service account JSON (preferred over legacy server key). */
+    serviceAccountPath: cleanEnv(process.env.FCM_SERVICE_ACCOUNT_PATH),
   },
   corsOrigins: process.env.CORS_ORIGINS?.split(',').map((o) => o.trim()) || ['*'],
   /** Google Maps / Places API key (server-side proxy for Flutter). */

@@ -3,6 +3,7 @@ import { pool } from '../db/pool.js';
 import * as requestRepository from '../repositories/trip_sender_request.repository.js';
 import * as offerRepository from '../repositories/trip_counter_offer.repository.js';
 import * as notificationCreateService from './notification_create.service.js';
+import { sendSenderOfferAcceptedEmail } from './email.service.js';
 
 function formatDateOnly(value) {
   if (value == null) return null;
@@ -125,6 +126,9 @@ export function mapCounterOfferForSender(row) {
       row.traveler_rating != null ? Number(row.traveler_rating) : null,
     travelerReviewCount: Number(row.traveler_review_count) || 0,
     travelerBio: row.traveler_bio || null,
+    deliveryStatus: row.delivery_status || null,
+    paymentPending:
+      row.status === 'accepted' && row.delivery_status === 'posted',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sentAt: row.updated_at || row.created_at,
@@ -183,16 +187,53 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
   const travelerName = await travelerDisplayName(travelerId).catch(() => 'A traveler');
   const amountLabel = `$${amount.toFixed(2)}`;
   const routeLabel = mapped.route || 'your parcel';
+  const maxBudget = Number(request.max_budget) || 0;
+  // Accept Offer uses sender max budget; a lower amount is a real counter offer.
+  const acceptedOffer =
+    body.acceptedOffer === true ||
+    (!isUpdate && Math.abs(amount - maxBudget) < 0.005);
+
+  if (acceptedOffer && !isUpdate) {
+    await requestRepository
+      .respondToSenderRequest(requestId, travelerId, 'accepted')
+      .catch((err) => {
+        console.error(
+          '[counter-offer] mark sender request accepted failed:',
+          err?.message || err
+        );
+      });
+  }
+
+  let title;
+  let bodyText;
+  let type;
+  if (acceptedOffer && !isUpdate) {
+    title = 'Offer accepted';
+    bodyText =
+      `${travelerName} accepted your offer of ${amountLabel} for ` +
+      `${deliveryPublicId} (${routeLabel}).`;
+    type = 'offerAccepted';
+  } else if (isUpdate) {
+    title = 'Counter offer updated';
+    bodyText =
+      `${travelerName} updated their counter offer to ${amountLabel} for ` +
+      `${deliveryPublicId} (${routeLabel}).`;
+    type = 'counterOffer';
+  } else {
+    title = 'New counter offer';
+    bodyText =
+      `${travelerName} sent a counter offer of ${amountLabel} for ` +
+      `${deliveryPublicId} (${routeLabel}).`;
+    type = 'counterOffer';
+  }
 
   await notificationCreateService
     .createNotification({
       userId: String(request.sender_id),
       role: 'sender',
-      type: 'counterOffer',
-      title: isUpdate ? 'Counter offer updated' : 'New counter offer',
-      body: isUpdate
-        ? `${travelerName} updated their counter offer to ${amountLabel} for ${deliveryPublicId} (${routeLabel}).`
-        : `${travelerName} sent a counter offer of ${amountLabel} for ${deliveryPublicId} (${routeLabel}).`,
+      type,
+      title,
+      body: bodyText,
       route: `/sender-counter-offer/${row.id}`,
     })
     .then(() => {
@@ -203,6 +244,29 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
     .catch((err) => {
       console.error('[counter-offer] notify sender failed:', err?.message || err);
     });
+
+  if (acceptedOffer && !isUpdate) {
+    const senderEmail = String(request.sender_email || '').trim();
+    if (senderEmail) {
+      void sendSenderOfferAcceptedEmail(senderEmail, {
+        publicId: deliveryPublicId,
+        travelerName,
+        route: routeLabel,
+        amount,
+      })
+        .then(() => {
+          console.log(
+            `[counter-offer] sender offer-accepted email sent for ${deliveryPublicId} → ${senderEmail}`
+          );
+        })
+        .catch((err) => {
+          console.error(
+            '[counter-offer] sender offer-accepted email failed:',
+            err?.message || err
+          );
+        });
+    }
+  }
 
   return mapped;
 }
@@ -269,14 +333,20 @@ async function respondToCounterOffer(senderId, offerId, status, options = {}) {
     try {
       await onCounterOfferAccepted(mapped, existing, options);
     } catch (err) {
-      // Roll back accept if escrow/payment failed so sender can retry.
-      await offerRepository
-        .updateOfferStatusForSender({
+      // Keep accepted + posted when Stripe/wallet payment is still pending (402).
+      if (err?.code !== 'PAYMENT_REQUIRED') {
+        await rollbackIncompleteAccept({
           offerId,
           senderId,
-          status: existing.status,
-        })
-        .catch(() => {});
+          previousOfferStatus: existing.status,
+          deliveryId: existing.delivery_id,
+        }).catch((rollbackErr) => {
+          console.error(
+            '[counter-offer] rollback after failed accept:',
+            rollbackErr?.message || rollbackErr
+          );
+        });
+      }
       throw err;
     }
     await notifyTravelerCounterOfferAccepted(mapped, existing).catch((err) => {
@@ -285,9 +355,44 @@ async function respondToCounterOffer(senderId, offerId, status, options = {}) {
         err?.message || err
       );
     });
+  } else if (status === 'rejected') {
+    await notifyTravelerCounterOfferRejected(mapped, existing).catch((err) => {
+      console.error(
+        '[counter-offer] notify traveler of reject failed:',
+        err?.message || err
+      );
+    });
   }
 
   return mapped;
+}
+
+async function rollbackIncompleteAccept({
+  offerId,
+  senderId,
+  previousOfferStatus,
+  deliveryId,
+}) {
+  await offerRepository.forceUpdateOfferStatusForSender({
+    offerId,
+    senderId,
+    status: previousOfferStatus,
+    fromStatuses: ['accepted'],
+  });
+
+  if (!deliveryId) return;
+
+  // Only clear booking fields if payment never completed the lifecycle.
+  await pool.query(
+    `UPDATE deliveries
+     SET traveler_id = NULL,
+         trip_id = NULL,
+         bid_amount = NULL,
+         updated_at = NOW()
+     WHERE id = $1
+       AND status = 'posted'::delivery_status`,
+    [deliveryId]
+  );
 }
 
 async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
@@ -302,6 +407,7 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
   const tripId = mapped.tripId || rawRow.trip_id;
   const amount = Number(mapped.amount) || Number(rawRow.amount) || 0;
 
+  // Assign traveler before escrow so platform fees can charge the traveler wallet.
   await pool.query(
     `UPDATE deliveries
      SET traveler_id = $2, trip_id = $3, bid_amount = $4, updated_at = NOW()
@@ -314,7 +420,25 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
     deliveryPublicId,
     amountDollars: amount,
     paymentIntentId: options.paymentIntentId || null,
+    paymentMethod: options.paymentMethod === 'wallet' ? 'wallet' : 'stripe',
   });
+
+  await pool.query(
+    `UPDATE deliveries
+     SET meetup_location = COALESCE(
+           NULLIF(TRIM(meetup_location), ''),
+           NULLIF(TRIM((preferred_meetup_locations)[1]), '')
+         ),
+         meetup_agreed_by_sender = CASE
+           WHEN meetup_location IS NULL
+             AND NULLIF(TRIM((preferred_meetup_locations)[1]), '') IS NOT NULL
+           THEN TRUE
+           ELSE meetup_agreed_by_sender
+         END,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [deliveryId]
+  );
 
   const timerService = await import('./timer.service.js');
   await timerService.scheduleReceiverPayment(deliveryId);
@@ -328,7 +452,7 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
       traveler_id: travelerId,
       trip_id: tripId,
       bid_amount: amount,
-      chat_unlocked: false,
+      chat_unlocked: true,
     },
   });
 
@@ -338,8 +462,30 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
       participantAId: senderId,
       participantBId: travelerId,
       threadType: 'sender_traveler',
-      unlocked: false,
+      unlocked: true,
     });
+    await chatRepository.setConversationUnlocked(deliveryId, 'sender_traveler', true);
+  }
+
+  // Also open the traveler <-> receiver thread now, so the traveler can chat
+  // with the receiver from the moment a traveler is assigned (not only after
+  // the NFC handoff). Without this the thread doesn't exist yet and the app
+  // has no conversation to open.
+  if (travelerId) {
+    const { rows: delRows } = await pool.query(
+      `SELECT receiver_id FROM deliveries WHERE id = $1`,
+      [deliveryId]
+    );
+    const receiverId = delRows[0]?.receiver_id;
+    if (receiverId) {
+      await chatRepository.ensureConversation({
+        deliveryId,
+        participantAId: travelerId,
+        participantBId: receiverId,
+        threadType: 'traveler_receiver',
+        unlocked: true,
+      });
+    }
   }
 }
 
@@ -370,7 +516,83 @@ async function notifyTravelerCounterOfferAccepted(mapped, rawRow) {
   );
 }
 
+async function notifyTravelerCounterOfferRejected(mapped, rawRow) {
+  const travelerId = mapped.travelerId || rawRow.traveler_id;
+  if (!travelerId) return;
+
+  const amount = Number(mapped.amount) || Number(rawRow.amount) || 0;
+  const amountLabel = `$${amount.toFixed(2)}`;
+  const deliveryPublicId =
+    mapped.deliveryPublicId || rawRow.delivery_public_id || 'your parcel';
+  const routeLabel = mapped.route || deliveryRoute(rawRow) || 'your route';
+  const offerId = mapped.id || rawRow.id;
+
+  await notificationCreateService.createNotification({
+    userId: String(travelerId),
+    role: 'traveler',
+    type: 'bidRejected',
+    title: 'Counter offer declined',
+    body:
+      `A sender declined your counter offer of ${amountLabel} for ` +
+      `${deliveryPublicId} (${routeLabel}).`,
+    route: `/traveler-bid-detail/${offerId}`,
+  });
+
+  console.log(
+    `[counter-offer] traveler reject alert created for ${deliveryPublicId} → ${travelerId}`
+  );
+}
+
 export async function acceptCounterOfferForSender(senderId, offerId, options = {}) {
+  const existing = await offerRepository.findOfferForSender(offerId, senderId);
+  if (!existing) {
+    throw new AppError('Counter offer not found', 404, 'NOT_FOUND');
+  }
+
+  // Resume half-finished accepts (offer accepted but escrow/status never completed).
+  if (existing.status === 'accepted') {
+    const { rows } = await pool.query(
+      `SELECT id, status FROM deliveries WHERE id = $1`,
+      [existing.delivery_id]
+    );
+    const delivery = rows[0];
+    if (delivery && delivery.status === 'posted') {
+      const mapped = mapCounterOfferForSender(existing);
+      try {
+        await onCounterOfferAccepted(mapped, existing, options);
+      } catch (err) {
+        if (err?.code !== 'PAYMENT_REQUIRED') {
+          await rollbackIncompleteAccept({
+            offerId,
+            senderId,
+            previousOfferStatus: 'pending',
+            deliveryId: existing.delivery_id,
+          }).catch((rollbackErr) => {
+            console.error(
+              '[counter-offer] rollback after failed resume:',
+              rollbackErr?.message || rollbackErr
+            );
+          });
+        }
+        throw err;
+      }
+      await notifyTravelerCounterOfferAccepted(mapped, existing).catch((err) => {
+        console.error(
+          '[counter-offer] notify traveler of accept failed:',
+          err?.message || err
+        );
+      });
+      return mapCounterOfferForSender(
+        (await offerRepository.findOfferForSender(offerId, senderId)) || existing
+      );
+    }
+    throw new AppError(
+      'This offer is already accepted.',
+      400,
+      'INVALID_STATUS'
+    );
+  }
+
   return respondToCounterOffer(senderId, offerId, 'accepted', options);
 }
 

@@ -84,6 +84,7 @@ export async function findConversationForUser(conversationId, userId) {
   const { rows } = await pool.query(
     `SELECT c.*,
             d.public_id AS delivery_public_id,
+            d.status AS delivery_status,
             CASE
               WHEN c.participant_a_id = $2 THEN ub.name
               ELSE ua.name

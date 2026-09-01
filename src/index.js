@@ -1,4 +1,5 @@
 import http from 'http';
+import { createRequire } from 'module';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -31,9 +32,35 @@ trustSystemCertificates();
 
 const app = express();
 
+// Log any request slower than this so real bottlenecks are visible in prod.
+const SLOW_REQUEST_MS = Number(process.env.SLOW_REQUEST_MS) || 500;
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    if (ms >= SLOW_REQUEST_MS) {
+      console.warn(
+        `[slow] ${req.method} ${req.originalUrl} ${ms.toFixed(0)}ms ${res.statusCode}`
+      );
+    }
+  });
+  next();
+});
+
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
+
+// gzip responses. Loaded gracefully so a not-yet-installed dependency degrades
+// to "uncompressed" instead of crashing the server on boot.
+try {
+  const require = createRequire(import.meta.url);
+  const compression = require('compression');
+  app.use(compression());
+} catch {
+  console.warn('[perf] compression not installed — run `npm install` to enable gzip');
+}
+
 app.use(cors({
   origin: env.corsOrigins.includes('*') ? true : env.corsOrigins,
   credentials: true,
@@ -103,6 +130,13 @@ async function startServer() {
     console.log('Stripe payments enabled.');
   } else {
     console.warn('Stripe: STRIPE_SECRET_KEY not set — wallet top-up uses ledger mock.');
+  }
+
+  const { isFcmConfigured } = await import('./services/fcm.service.js');
+  if (isFcmConfigured()) {
+    console.log('Firebase push notifications enabled.');
+  } else {
+    console.warn('FCM: set FCM_SERVICE_ACCOUNT_PATH in .env for push delivery.');
   }
 
   httpServer.listen(env.port, env.host, () => {

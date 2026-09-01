@@ -171,10 +171,15 @@ export const getSenderCounterOffer = asyncHandler(async (req, res) => {
  */
 export const acceptSenderCounterOffer = asyncHandler(async (req, res) => {
   const offerService = await import('../services/trip_counter_offer.service.js');
+  const paymentMethod =
+    req.body?.paymentMethod === 'wallet' ? 'wallet' : 'stripe';
   const data = await offerService.acceptCounterOfferForSender(
     req.user.id,
     req.params.offerId,
-    { paymentIntentId: req.body?.paymentIntentId || null }
+    {
+      paymentIntentId: req.body?.paymentIntentId || null,
+      paymentMethod,
+    }
   );
   res.json({ success: true, data });
 });

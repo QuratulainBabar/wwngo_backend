@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { pool } from '../db/pool.js';
-import { hashToken, verifyTokenHash } from '../utils/password.js';
+import { verifyTokenHash } from '../utils/password.js';
 import { AppError } from '../utils/errors.js';
 
 function parseDurationMs(duration) {
@@ -12,6 +12,15 @@ function parseDurationMs(duration) {
   const unit = match[2];
   const multipliers = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
   return value * multipliers[unit];
+}
+
+/** Fast deterministic hash for refresh-token DB lookup (O(1)). */
+function sha256Token(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function isSha256Hash(value) {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 }
 
 export function signAccessToken(user) {
@@ -24,7 +33,7 @@ export function signAccessToken(user) {
 
 export async function createRefreshToken(userId) {
   const token = crypto.randomBytes(48).toString('hex');
-  const tokenHash = await hashToken(token);
+  const tokenHash = sha256Token(token);
   const expiresAt = new Date(Date.now() + parseDurationMs(env.jwt.refreshExpiresIn));
 
   await pool.query(
@@ -37,19 +46,39 @@ export async function createRefreshToken(userId) {
 }
 
 export async function rotateRefreshToken(oldToken) {
-  const { rows } = await pool.query(
+  const lookup = sha256Token(oldToken);
+
+  // Prefer O(1) sha256 lookup (new tokens).
+  let { rows } = await pool.query(
     `SELECT rt.id, rt.user_id, rt.token_hash, rt.expires_at, rt.revoked_at,
             u.account_status
      FROM refresh_tokens rt
      JOIN users u ON u.id = rt.user_id
-     WHERE rt.revoked_at IS NULL AND rt.expires_at > NOW()`
+     WHERE rt.token_hash = $1
+       AND rt.revoked_at IS NULL
+       AND rt.expires_at > NOW()
+     LIMIT 1`,
+    [lookup]
   );
 
-  let matched = null;
-  for (const row of rows) {
-    if (await verifyTokenHash(oldToken, row.token_hash)) {
-      matched = row;
-      break;
+  let matched = rows[0] || null;
+
+  // Legacy bcrypt-hashed refresh tokens (pre sha256 migration).
+  if (!matched) {
+    const { rows: candidates } = await pool.query(
+      `SELECT rt.id, rt.user_id, rt.token_hash, rt.expires_at, rt.revoked_at,
+              u.account_status
+       FROM refresh_tokens rt
+       JOIN users u ON u.id = rt.user_id
+       WHERE rt.revoked_at IS NULL AND rt.expires_at > NOW()`
+    );
+
+    for (const row of candidates) {
+      if (isSha256Hash(row.token_hash)) continue;
+      if (await verifyTokenHash(oldToken, row.token_hash)) {
+        matched = row;
+        break;
+      }
     }
   }
 
@@ -75,11 +104,22 @@ export async function rotateRefreshToken(oldToken) {
 }
 
 export async function revokeRefreshToken(token) {
+  const lookup = sha256Token(token);
+  const { rowCount } = await pool.query(
+    `UPDATE refresh_tokens
+     SET revoked_at = NOW()
+     WHERE token_hash = $1 AND revoked_at IS NULL`,
+    [lookup]
+  );
+  if (rowCount > 0) return true;
+
+  // Legacy bcrypt rows.
   const { rows } = await pool.query(
     'SELECT id, token_hash FROM refresh_tokens WHERE revoked_at IS NULL'
   );
 
   for (const row of rows) {
+    if (isSha256Hash(row.token_hash)) continue;
     if (await verifyTokenHash(token, row.token_hash)) {
       await pool.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1', [row.id]);
       return true;

@@ -27,6 +27,27 @@ export async function getWallet(userId, role) {
   return ensureWallet(userId, role);
 }
 
+/**
+ * Read-only wallet fetch — never writes. Returns a zeroed row when the wallet
+ * doesn't exist yet, so hot read endpoints don't pay an INSERT..ON CONFLICT
+ * (and a WAL write) on every view.
+ */
+export async function getWalletReadOnly(userId, role) {
+  const normalized = normalizeRole(role);
+  const { rows } = await pool.query(
+    `SELECT * FROM wallets WHERE user_id = $1 AND role = $2::wallet_role`,
+    [userId, normalized]
+  );
+  return (
+    rows[0] || {
+      user_id: userId,
+      role: normalized,
+      available_cents: 0,
+      escrow_cents: 0,
+    }
+  );
+}
+
 /** True if any ledger row for this user has the given description. */
 export async function hasLedgerDescription(userId, description) {
   const { rows } = await pool.query(

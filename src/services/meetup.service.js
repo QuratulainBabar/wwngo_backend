@@ -3,16 +3,71 @@ import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
 import * as chatRepository from '../repositories/chat.repository.js';
 
+async function finalizeMeetupIfFullyAgreed(deliveryId) {
+  const { rows } = await pool.query(`SELECT * FROM deliveries WHERE id = $1`, [deliveryId]);
+  const d = rows[0];
+  if (!d) return null;
+
+  const fullyAgreed =
+    Boolean(d.meetup_agreed_by_sender) && Boolean(d.meetup_agreed_by_traveler);
+  if (!fullyAgreed) {
+    return getMeetupStatusRow(d);
+  }
+
+  await pool.query(
+    `UPDATE deliveries
+     SET status = 'ready_for_handoff'::delivery_status,
+         updated_at = NOW()
+     WHERE id = $1
+       AND status IN ('bid_accepted', 'matched')`,
+    [deliveryId]
+  );
+
+  if (d.sender_id && d.traveler_id) {
+    await chatRepository.ensureConversation({
+      deliveryId,
+      participantAId: d.sender_id,
+      participantBId: d.traveler_id,
+      threadType: 'sender_traveler',
+      unlocked: true,
+    });
+    await chatRepository.setConversationUnlocked(deliveryId, 'sender_traveler', true);
+  }
+
+  const { rows: updated } = await pool.query(`SELECT * FROM deliveries WHERE id = $1`, [
+    deliveryId,
+  ]);
+  return getMeetupStatusRow(updated[0] || d);
+}
+
+function getMeetupStatusRow(d) {
+  return {
+    deliveryId: d.id,
+    location: d.meetup_location,
+    agreedBySender: Boolean(d.meetup_agreed_by_sender),
+    agreedByTraveler: Boolean(d.meetup_agreed_by_traveler),
+    fullyAgreed: Boolean(d.meetup_agreed_by_sender && d.meetup_agreed_by_traveler),
+    chatUnlocked: Boolean(d.chat_unlocked),
+    deliveryStatus: d.status,
+  };
+}
+
 export async function proposeMeetup(deliveryIdOrPublic, userId, { location }) {
   const deliveryId = await resolveDeliveryId(deliveryIdOrPublic);
   const label = String(location || '').trim();
   if (!label) throw new AppError('Meetup location is required', 400, 'VALIDATION_ERROR');
 
   const delivery = await getDeliveryAndAssertParticipant(deliveryId, userId);
+  const isSender = delivery.participantRole === 'sender';
 
   await pool.query(
-    `UPDATE deliveries SET meetup_location = $2, updated_at = NOW() WHERE id = $1`,
-    [deliveryId, label]
+    `UPDATE deliveries
+     SET meetup_location = $2,
+         meetup_agreed_by_sender = $3,
+         meetup_agreed_by_traveler = $4,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [deliveryId, label, isSender, isSender ? false : true]
   );
 
   await pool.query(
@@ -21,7 +76,7 @@ export async function proposeMeetup(deliveryIdOrPublic, userId, { location }) {
     [deliveryId, label, userId, delivery.participantRole]
   );
 
-  return getMeetupStatus(deliveryId, userId);
+  return finalizeMeetupIfFullyAgreed(deliveryId);
 }
 
 export async function agreeMeetup(deliveryIdOrPublic, userId) {
@@ -32,49 +87,29 @@ export async function agreeMeetup(deliveryIdOrPublic, userId) {
       ? 'meetup_agreed_by_sender'
       : 'meetup_agreed_by_traveler';
 
+  if (!delivery.meetup_location) {
+    throw new AppError(
+      'Propose a meetup location before confirming agreement',
+      400,
+      'MEETUP_LOCATION_REQUIRED'
+    );
+  }
+
   await pool.query(
     `UPDATE deliveries SET ${col} = TRUE, updated_at = NOW() WHERE id = $1`,
     [deliveryId]
   );
 
-  const status = await getMeetupStatus(deliveryId, userId);
-
-  if (status.fullyAgreed) {
-    await pool.query(
-      `UPDATE deliveries SET chat_unlocked = TRUE, status = 'ready_for_handoff'::delivery_status, updated_at = NOW()
-       WHERE id = $1 AND status IN ('bid_accepted', 'matched')`,
-      [deliveryId]
-    );
-
-    if (delivery.sender_id && delivery.traveler_id) {
-      await chatRepository.ensureConversation({
-        deliveryId,
-        participantAId: delivery.sender_id,
-        participantBId: delivery.traveler_id,
-        threadType: 'sender_traveler',
-        unlocked: true,
-      });
-      await chatRepository.setConversationUnlocked(deliveryId, 'sender_traveler', true);
-    }
-  }
-
-  return getMeetupStatus(deliveryId, userId);
+  return finalizeMeetupIfFullyAgreed(deliveryId);
 }
 
 export async function getMeetupStatus(deliveryIdOrPublic, userId) {
   const deliveryId = await resolveDeliveryId(deliveryIdOrPublic);
+  await getDeliveryAndAssertParticipant(deliveryId, userId);
   const { rows } = await pool.query(`SELECT * FROM deliveries WHERE id = $1`, [deliveryId]);
   const d = rows[0];
   if (!d) throw new AppError('Delivery not found', 404, 'NOT_FOUND');
-
-  return {
-    deliveryId,
-    location: d.meetup_location,
-    agreedBySender: Boolean(d.meetup_agreed_by_sender),
-    agreedByTraveler: Boolean(d.meetup_agreed_by_traveler),
-    fullyAgreed: Boolean(d.meetup_agreed_by_sender && d.meetup_agreed_by_traveler),
-    chatUnlocked: Boolean(d.chat_unlocked),
-  };
+  return getMeetupStatusRow(d);
 }
 
 async function getDeliveryAndAssertParticipant(deliveryId, userId) {

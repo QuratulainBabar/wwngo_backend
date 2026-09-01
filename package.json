@@ -5,20 +5,23 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "start": "node --use-system-ca src/index.js",
-    "dev": "node --use-system-ca --watch src/index.js",
-    "db:migrate": "node --use-system-ca src/db/migrate.js"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "db:migrate": "node src/db/migrate.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",
+    "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.2",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "express-validator": "^7.2.1",
+    "firebase-admin": "^13.10.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.2.0",

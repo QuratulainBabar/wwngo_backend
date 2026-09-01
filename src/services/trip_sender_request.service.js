@@ -302,6 +302,7 @@ export async function acceptSenderRequest(travelerId, requestId) {
   const counterOfferService = await import('./trip_counter_offer.service.js');
   return counterOfferService.createOrUpdateCounterOffer(travelerId, requestId, {
     amount: Number(request.max_budget),
+    acceptedOffer: true,
   });
 }
 

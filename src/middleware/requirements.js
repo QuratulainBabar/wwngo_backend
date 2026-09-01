@@ -1,7 +1,11 @@
 import { pool } from '../db/pool.js';
 import { AppError } from '../utils/errors.js';
 import * as walletRepo from '../repositories/wallet.repository.js';
-import { minWalletCentsForRole } from '../utils/fees.js';
+import {
+  minWalletCentsForRole,
+  minWalletCentsForSenderCreate,
+  parsePaysReceiverFee,
+} from '../utils/fees.js';
 
 export const MIN_WALLET_RESERVE_CENTS = 200; // $2.00 default (sender/receiver)
 
@@ -50,6 +54,31 @@ export function requireWalletMinimum(role = 'traveler') {
       next(err);
     }
   };
+}
+
+/** After multipart body is parsed — sender min depends on parcel category + fee choice. */
+export function requireSenderWalletForDeliveryCreate(req, _res, next) {
+  (async () => {
+    try {
+      const body = req.body || {};
+      const paysReceiver = parsePaysReceiverFee(body);
+      const category = String(body.parcelCategory || 'documents').trim() || 'documents';
+      const minCents = minWalletCentsForSenderCreate(category, paysReceiver);
+      const wallet = await walletRepo.getWallet(req.user.id, 'sender');
+      if (Number(wallet.available_cents) < minCents) {
+        return next(
+          new AppError(
+            `Wallet must have at least $${(minCents / 100).toFixed(2)} available to post this delivery`,
+            403,
+            'INSUFFICIENT_WALLET'
+          )
+        );
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  })();
 }
 
 export async function requireFullyVerified(req, _res, next) {

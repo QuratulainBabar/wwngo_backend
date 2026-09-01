@@ -11,6 +11,10 @@ function hashDevice(deviceId) {
   return crypto.createHash('sha256').update(String(deviceId || 'unknown')).digest('hex');
 }
 
+function sameUserId(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
 export async function recordCheckpoint({
   deliveryId: deliveryIdOrPublic,
   userId,
@@ -19,6 +23,7 @@ export async function recordCheckpoint({
   gpsLat = null,
   gpsLng = null,
   confirm = false,
+  paymentIntentId = null,
 }) {
   const deliveryId = await resolveDeliveryId(deliveryIdOrPublic);
   const delivery = await getDeliveryForCheckpoint(deliveryId, userId, checkpoint);
@@ -46,15 +51,15 @@ export async function recordCheckpoint({
   } else {
     const isSecondParty =
       confirm &&
-      existing.initiator_id !== userId &&
+      !sameUserId(existing.initiator_id, userId) &&
       !existing.confirmer_id;
     const { rows } = await pool.query(
       `UPDATE nfc_checkpoints SET
-         confirmer_id = CASE WHEN $2 THEN $3 ELSE confirmer_id END,
+         confirmer_id = CASE WHEN $2::boolean THEN $3 ELSE confirmer_id END,
          device_hash = COALESCE($4, device_hash),
          gps_lat = COALESCE($5, gps_lat),
          gps_lng = COALESCE($6, gps_lng),
-         confirmed_at = CASE WHEN $2 THEN NOW() ELSE confirmed_at END
+         confirmed_at = CASE WHEN $2::boolean THEN NOW() ELSE confirmed_at END
        WHERE delivery_id = $1 AND checkpoint = $7::nfc_checkpoint_type
        RETURNING *`,
       [
@@ -70,19 +75,42 @@ export async function recordCheckpoint({
     record = rows[0];
   }
 
-  if (confirm && existing && existing.initiator_id === userId && !existing.confirmer_id) {
+  if (
+    confirm &&
+    existing &&
+    sameUserId(existing.initiator_id, userId) &&
+    !existing.confirmer_id
+  ) {
     throw new AppError(
-      'Waiting for the other party to confirm NFC on their device',
+      checkpoint === 'delivery_traveler_receiver'
+        ? 'Waiting for the receiver to confirm NFC Checkpoint 2 on their device'
+        : 'Waiting for the other party to confirm NFC on their device',
       400,
       'NFC_PENDING_PEER'
     );
   }
 
   if (record.confirmed_at) {
-    await applyCheckpointEffects(delivery, checkpoint, userId);
+    try {
+      await applyCheckpointEffects(delivery, checkpoint, userId, { paymentIntentId });
+    } catch (err) {
+      console.error(
+        `[nfc] checkpoint ${checkpoint} confirmed but effects failed for ${delivery.public_id}:`,
+        err?.message || err
+      );
+      throw err;
+    }
   }
 
-  return mapCheckpoint(record);
+  const { rows: freshDelivery } = await pool.query(
+    `SELECT status FROM deliveries WHERE id = $1`,
+    [delivery.id]
+  );
+  const mapped = mapCheckpoint(record);
+  return {
+    ...mapped,
+    deliveryStatus: freshDelivery[0]?.status || delivery.status,
+  };
 }
 
 async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
@@ -92,12 +120,12 @@ async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
 
   if (checkpoint === 'handoff_sender_traveler') {
     const allowed = [d.sender_id, d.traveler_id].filter(Boolean);
-    if (!allowed.includes(userId)) {
+    if (!allowed.some((id) => sameUserId(id, userId))) {
       throw new AppError('Not authorized for this checkpoint', 403, 'FORBIDDEN');
     }
   } else if (checkpoint === 'delivery_traveler_receiver') {
     const allowed = [d.traveler_id, d.receiver_id].filter(Boolean);
-    if (!allowed.includes(userId)) {
+    if (!allowed.some((id) => sameUserId(id, userId))) {
       throw new AppError('Not authorized for this checkpoint', 403, 'FORBIDDEN');
     }
   }
@@ -105,29 +133,16 @@ async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
   return d;
 }
 
-async function applyCheckpointEffects(delivery, checkpoint, userId) {
+async function applyCheckpointEffects(delivery, checkpoint, userId, options = {}) {
   const publicId = delivery.public_id;
 
   if (checkpoint === 'handoff_sender_traveler') {
-    if (delivery.traveler_id) {
-      await escrowService.chargeTravelerHandoffFee(
-        delivery.traveler_id,
-        publicId,
-        delivery.parcel_category
-      );
-    }
+    // Traveler handoff fee is charged at bid accept — NFC CP1 only confirms handoff.
     await deliveryState.transitionDelivery({
       deliveryId: delivery.id,
       toStatus: 'collected',
       actorId: userId,
       note: 'NFC checkpoint 1 — sender/traveler handoff',
-    });
-
-    await deliveryState.transitionDelivery({
-      deliveryId: delivery.id,
-      toStatus: 'in_transit',
-      actorId: userId,
-      note: 'Parcel in transit after handoff',
     });
 
     if (delivery.traveler_id && delivery.receiver_id) {
@@ -147,6 +162,13 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
         'Parcel collected',
         `Your parcel ${publicId} was handed to the traveler.`,
         `/shipment/${publicId}`,
+      ],
+      [
+        delivery.traveler_id,
+        'traveler',
+        'Parcel collected',
+        `You received parcel ${publicId}. Mark in transit when you begin travel.`,
+        `/shipment/${publicId}?traveler=true`,
       ],
       [
         delivery.receiver_id,

@@ -8,6 +8,7 @@ import {
   receiverPlatformFeeCents,
   travelerPlatformFeeCents,
   travelerHandoffFeeCents,
+  platformFeeDescription,
 } from '../utils/fees.js';
 
 function dollarsToCents(amount) {
@@ -109,6 +110,7 @@ export async function holdEscrowForDelivery({
   deliveryPublicId,
   amountDollars,
   paymentIntentId = null,
+  paymentMethod = 'stripe',
 }) {
   const amountCents = dollarsToCents(amountDollars);
   if (amountCents <= 0) {
@@ -132,7 +134,14 @@ export async function holdEscrowForDelivery({
   const paysReceiver = senderPaysReceiverFee(delivery);
   const category = delivery.parcel_category;
   const senderFee = senderPlatformFeeCents(category, paysReceiver);
-  const totalNeeded = amountCents + senderFee;
+  const senderFeeAlreadyPaid = await hasPlatformFeePaid(
+    senderId,
+    'sender',
+    deliveryPublicId,
+    'Platform fee'
+  );
+  const totalNeeded =
+    amountCents + (senderFeeAlreadyPaid ? 0 : senderFee);
 
   if (paymentIntentId) {
     const walletService = await import('./wallet.service.js');
@@ -144,9 +153,22 @@ export async function holdEscrowForDelivery({
   const shortfall = totalNeeded - available;
 
   if (shortfall > 0) {
+    if (paymentMethod === 'wallet') {
+      throw new AppError(
+        'Insufficient wallet balance. Add funds or pay with card.',
+        403,
+        'INSUFFICIENT_WALLET',
+        {
+          amountCents: totalNeeded,
+          availableCents: available,
+          shortfallCents: shortfall,
+          role: 'sender',
+          shipmentId: deliveryPublicId,
+        }
+      );
+    }
+
     if (stripeService.isConfigured()) {
-      const walletService = await import('./wallet.service.js');
-      // Patch purpose in createTopUpPaymentIntent metadata via dedicated helper
       const payment = await createEscrowShortfallIntent(
         senderId,
         shortfall,
@@ -204,37 +226,47 @@ export async function holdEscrowForDelivery({
     );
 
     const receiverFee = receiverPlatformFeeCents(category, paysReceiver);
-    const travelerId = delivery.traveler_id;
     const receiverId = delivery.receiver_id;
-    const travelerFee = travelerId ? travelerPlatformFeeCents(category) : 0;
+    const receiverFeeAlreadyPaid =
+      !receiverId ||
+      delivery.receiver_paid_at ||
+      (await hasPlatformFeePaid(receiverId, 'receiver', deliveryPublicId, 'Platform fee'));
 
-    await chargeWalletOrCard({
-      userId: senderId,
-      role: 'sender',
-      amountCents: senderFee,
-      description: `Platform fee for ${deliveryPublicId}`,
-      shipmentId: deliveryPublicId,
-      allowPaymentRequired: false,
-    });
-
-    if (receiverId && receiverFee > 0) {
+    if (!senderFeeAlreadyPaid) {
       await chargeWalletOrCard({
-        userId: receiverId,
-        role: 'receiver',
-        amountCents: receiverFee,
-        description: `Platform fee for ${deliveryPublicId}`,
+        userId: senderId,
+        role: 'sender',
+        amountCents: senderFee,
+        description: platformFeeDescription(deliveryPublicId),
         shipmentId: deliveryPublicId,
         allowPaymentRequired: false,
       });
     }
 
-    if (travelerId && travelerFee > 0) {
+    if (receiverId && receiverFee > 0 && !receiverFeeAlreadyPaid) {
       await chargeWalletOrCard({
-        userId: travelerId,
-        role: 'traveler',
-        amountCents: travelerFee,
-        description: `Platform fee for ${deliveryPublicId}`,
+        userId: receiverId,
+        role: 'receiver',
+        amountCents: receiverFee,
+        description: platformFeeDescription(deliveryPublicId),
         shipmentId: deliveryPublicId,
+        allowPaymentRequired: false,
+      });
+      await pool.query(
+        `UPDATE deliveries
+         SET receiver_paid_at = NOW(),
+             receiver_fee_cents = $2,
+             receiver_payment_due_at = NULL,
+             updated_at = NOW()
+         WHERE public_id = $1`,
+        [deliveryPublicId, receiverFee]
+      );
+    }
+
+    // Traveler handoff fee is locked at bid accept (not at NFC CP1).
+    const travelerId = delivery.traveler_id;
+    if (travelerId) {
+      await chargeTravelerHandoffFee(travelerId, deliveryPublicId, category, {
         allowPaymentRequired: false,
       });
     }
@@ -366,32 +398,96 @@ export async function refundEscrowForDelivery(deliveryPublicId, reason = 'Cancel
   return { refunded: true, amountCents };
 }
 
-/** Traveler handoff fee at NFC checkpoint 1 (skip if already paid at booking). */
-export async function chargeTravelerHandoffFee(travelerId, deliveryPublicId, parcelCategory) {
-  const alreadyPaid = await hasPlatformFeePaid(
-    travelerId,
-    'traveler',
-    deliveryPublicId,
-    'Platform fee'
+/**
+ * Refund net platform/handoff fees charged on a shipment (all roles).
+ * Used when booking cancel happens ≥24h before travel.
+ */
+export async function refundPlatformFeesForDelivery(
+  deliveryPublicId,
+  reason = 'Platform fee refund on cancellation'
+) {
+  const { rows } = await pool.query(
+    `SELECT user_id, role,
+       COALESCE(SUM(CASE WHEN type = 'platform_fee' THEN amount_cents ELSE 0 END), 0) AS charged_cents,
+       COALESCE(SUM(
+         CASE
+           WHEN type = 'refund'
+             AND (description ILIKE '%platform fee%' OR description ILIKE '%handoff fee%')
+           THEN amount_cents
+           ELSE 0
+         END
+       ), 0) AS refunded_cents
+     FROM wallet_ledger
+     WHERE shipment_id = $1
+     GROUP BY user_id, role`,
+    [deliveryPublicId]
   );
+
+  const entries = [];
+  for (const row of rows) {
+    const net = Number(row.charged_cents) - Number(row.refunded_cents);
+    if (net <= 0) continue;
+
+    await walletRepo.appendLedgerEntry({
+      userId: row.user_id,
+      role: row.role,
+      type: 'refund',
+      amountCents: net,
+      availableDeltaCents: net,
+      description: `${reason} for ${deliveryPublicId}`,
+      shipmentId: deliveryPublicId,
+    });
+    entries.push({
+      userId: row.user_id,
+      role: row.role,
+      amountCents: net,
+    });
+  }
+
+  return { refunded: entries.length > 0, entries };
+}
+
+/** Hold escrow during an open dispute (no payout until admin resolves). */
+export async function freezeEscrowForDelivery(deliveryPublicId) {
+  const { rowCount } = await pool.query(
+    `UPDATE shipment_escrows
+     SET status = 'frozen', updated_at = NOW()
+     WHERE shipment_id = $1 AND status = 'held'`,
+    [deliveryPublicId]
+  );
+  return { frozen: rowCount > 0 };
+}
+
+/**
+ * Traveler handoff fee — charged at sender bid accept / booking lock.
+ * Safe to call again (skips if already paid). NFC CP1 no longer charges this.
+ */
+export async function chargeTravelerHandoffFee(
+  travelerId,
+  deliveryPublicId,
+  parcelCategory,
+  { paymentIntentId = null, allowPaymentRequired = false } = {}
+) {
+  const alreadyPaid =
+    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Platform fee')) ||
+    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Handoff fee'));
   if (alreadyPaid) {
     return { charged: false, reason: 'already_paid' };
   }
 
-  const feeCents = travelerHandoffFeeCents(parcelCategory);
-  try {
-    await chargeWalletOrCard({
-      userId: travelerId,
-      role: 'traveler',
-      amountCents: feeCents,
-      description: `Handoff fee for ${deliveryPublicId}`,
-      shipmentId: deliveryPublicId,
-    });
-    return { charged: true, feeCents };
-  } catch (err) {
-    if (err.code === 'INSUFFICIENT_BALANCE' || err.code === 'INSUFFICIENT_WALLET') {
-      throw new AppError('Traveler wallet needs sufficient balance for handoff fee', 403, 'INSUFFICIENT_WALLET');
-    }
-    throw err;
+  if (paymentIntentId) {
+    const walletService = await import('./wallet.service.js');
+    await walletService.confirmTopUp(travelerId, paymentIntentId);
   }
+
+  const feeCents = travelerHandoffFeeCents(parcelCategory);
+  await chargeWalletOrCard({
+    userId: travelerId,
+    role: 'traveler',
+    amountCents: feeCents,
+    description: `Handoff fee for ${deliveryPublicId}`,
+    shipmentId: deliveryPublicId,
+    allowPaymentRequired,
+  });
+  return { charged: true, feeCents };
 }

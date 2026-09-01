@@ -113,6 +113,80 @@ function formatDeliveryTypeLabel(deliveryType) {
 }
 
 /**
+ * Notify a sender that a traveler accepted their parcel offer (max budget).
+ * Non-blocking — callers should catch/log failures.
+ * @param {string} to
+ * @param {{
+ *   publicId: string,
+ *   travelerName?: string | null,
+ *   route: string,
+ *   amount: number,
+ * }} details
+ */
+export async function sendSenderOfferAcceptedEmail(to, details) {
+  const travelerLabel = String(details.travelerName || '').trim() || 'A traveler';
+  const route = String(details.route || '').trim() || '—';
+  const parcelId = String(details.publicId || '').trim() || '—';
+  const amount =
+    details.amount != null && Number.isFinite(Number(details.amount))
+      ? `$${Number(details.amount).toFixed(2)}`
+      : '—';
+
+  const subject = `WWNGO — Traveler accepted your offer (${parcelId})`;
+  const text =
+    `Hello,\n\n` +
+    `${travelerLabel} accepted your offer of ${amount} for parcel ${parcelId}.\n\n` +
+    `Route: ${route}\n` +
+    `Accepted amount: ${amount}\n\n` +
+    `Open the WWNGO app to review and complete payment to confirm the booking.\n\n` +
+    `If you were not expecting this, please contact support.`;
+
+  const mail = {
+    from: env.smtp.from,
+    to,
+    subject,
+    text,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111;max-width:560px">
+        <h2 style="margin:0 0 12px">Traveler accepted your offer</h2>
+        <p style="margin:0 0 16px">
+          <strong>${travelerLabel}</strong> accepted your offer for parcel
+          <strong>${parcelId}</strong>.
+        </p>
+        <table style="border-collapse:collapse;margin:0 0 16px;font-size:15px">
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Route</td><td>${route}</td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Accepted amount</td><td><strong>${amount}</strong></td></tr>
+          <tr><td style="padding:4px 12px 4px 0;color:#555">Parcel ID</td><td><strong>${parcelId}</strong></td></tr>
+        </table>
+        <p style="margin:0 0 16px">
+          Open the <strong>WWNGO</strong> app to review and complete payment to confirm the booking.
+        </p>
+        <p style="margin:0;color:#888;font-size:13px">
+          If you were not expecting this, please contact support.
+        </p>
+      </div>
+    `,
+  };
+
+  try {
+    await getTransporter().sendMail(mail);
+    if (env.isDev) {
+      console.log(`[EMAIL] Offer accepted notification sent to ${to} (${parcelId})`);
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    console.error('[EMAIL] Failed to send offer accepted notification:', err?.message || err);
+    throw new AppError(
+      env.isDev
+        ? `Unable to send offer accepted email: ${err?.message || err}`
+        : 'Unable to send offer accepted email.',
+      502,
+      'EMAIL_SEND_FAILED'
+    );
+  }
+}
+
+/**
  * Notify a receiver that a sender posted a parcel for them.
  * Non-blocking for delivery creation — callers should catch/log failures.
  * @param {string} to

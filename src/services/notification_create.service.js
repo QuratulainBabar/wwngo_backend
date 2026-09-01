@@ -26,6 +26,11 @@ export async function createNotification({
     route,
   });
 
+  // Null means a duplicate parcelRequest was suppressed by the unique index
+  // (migration 019). Skip the SSE publish and FCM push so the receiver is only
+  // ever alerted once per parcel, even under concurrent list fetches.
+  if (!row) return null;
+
   const notification = mapNotification(row);
   const unreadCount = await notificationRepository.countUnread(
     normalizedUserId,

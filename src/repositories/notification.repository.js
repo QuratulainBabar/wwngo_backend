@@ -8,13 +8,20 @@ export async function createNotification({
   body,
   route = null,
 }) {
+  // The partial unique index (see migration 019) covers only
+  // type = 'parcelRequest' with a non-null route. For every other type the
+  // arbiter matches nothing, so the insert proceeds normally; for a duplicate
+  // parcelRequest it fires DO NOTHING and RETURNING yields no row. Callers must
+  // treat a null return as "already existed — do not re-notify".
   const { rows } = await pool.query(
     `INSERT INTO notifications (user_id, role, type, title, body, route)
      VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, role, route) WHERE type = 'parcelRequest' AND route IS NOT NULL
+     DO NOTHING
      RETURNING *`,
     [userId, role, type, title, body || '', route]
   );
-  return rows[0];
+  return rows[0] || null;
 }
 
 export async function listNotifications(userId, role, { limit = 50 } = {}) {

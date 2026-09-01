@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import * as deliveryController from '../controllers/delivery.controller.js';
 import { authenticate } from '../middleware/auth.js';
-import { requireKycApproved, requireFullyVerified, requireWalletMinimum } from '../middleware/requirements.js';
+import { requireKycApproved, requireFullyVerified, requireSenderWalletForDeliveryCreate } from '../middleware/requirements.js';
 import { deliveryPhotosUpload, handleMulterError } from '../middleware/upload.js';
 
 const router = Router();
@@ -11,13 +11,13 @@ router.post(
   authenticate,
   requireKycApproved,
   requireFullyVerified,
-  requireWalletMinimum('sender'),
   (req, res, next) => {
     deliveryPhotosUpload(req, res, (err) => {
       if (err) return handleMulterError(err, req, res, next);
       next();
     });
   },
+  requireSenderWalletForDeliveryCreate,
   deliveryController.createDelivery
 );
 
@@ -37,7 +37,7 @@ router.post(
   authenticate,
   deliveryController.requestTraveler
 );
-router.post('/:id/accept', authenticate, requireWalletMinimum('receiver'), deliveryController.acceptDelivery);
+router.post('/:id/accept', authenticate, deliveryController.acceptDelivery);
 router.post('/:id/decline', authenticate, deliveryController.declineDelivery);
 router.post('/:id/receiver-payment', authenticate, deliveryController.submitReceiverPayment);
 router.post('/:id/dispute', authenticate, deliveryController.openDispute);

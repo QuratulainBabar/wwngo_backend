@@ -70,6 +70,7 @@ const REQUEST_SELECT = `
           t.destination_country AS trip_destination_country,
           t.travel_date AS trip_travel_date,
           u.name AS sender_name,
+          u.email AS sender_email,
           u.rating AS sender_rating
 `;
 

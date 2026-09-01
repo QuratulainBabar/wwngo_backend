@@ -3,8 +3,8 @@ import * as walletRepo from '../repositories/wallet.repository.js';
 
 export const MINIMUM_WITHDRAWAL_CENTS = 1000;
 
-/** One-time credit after identity verification — $10 per role. */
-export const KYC_WELCOME_CREDIT_CENTS = 1000;
+/** Welcome balance is disabled — new users start at $0. */
+export const KYC_WELCOME_CREDIT_CENTS = 0;
 export const KYC_WELCOME_DESCRIPTION =
   'Welcome credit after identity verification';
 const KYC_WELCOME_ROLES = ['sender', 'traveler', 'receiver'];
@@ -53,11 +53,15 @@ function mapWallet(row) {
  * Always returns zeros when no activity exists (new user).
  */
 export async function getWalletSummary(userId, role, { recentLimit = 6 } = {}) {
-  const wallet = await walletRepo.getWallet(userId, role);
-  const recent = await walletRepo.listLedgerEntries(userId, role, {
-    limit: recentLimit,
-    includeHidden: false,
-  });
+  // Read-only + parallel: a wallet view shouldn't write, and the two reads are
+  // independent.
+  const [wallet, recent] = await Promise.all([
+    walletRepo.getWalletReadOnly(userId, role),
+    walletRepo.listLedgerEntries(userId, role, {
+      limit: recentLimit,
+      includeHidden: false,
+    }),
+  ]);
 
   return {
     ...mapWallet(wallet),
@@ -94,41 +98,24 @@ export async function getShipmentEscrow(userId, shipmentId) {
 }
 
 /**
- * Idempotent: credit $10 available to sender, traveler, and receiver wallets
- * after KYC approval. Safe to call from Continue-to-app and KYC sync/webhook.
+ * No welcome balance is granted on signup or after KYC — every new user starts
+ * at $0. This is intentionally a no-op that reports the current wallet state so
+ * existing callers (Continue-to-app, KYC sync) keep working without crediting.
  */
 export async function grantKycWelcomeCredit(userId) {
   if (!userId) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
   }
 
-  const alreadyGranted = await walletRepo.hasLedgerDescription(
-    userId,
-    KYC_WELCOME_DESCRIPTION
-  );
-
-  if (!alreadyGranted) {
-    for (const role of KYC_WELCOME_ROLES) {
-      await walletRepo.appendLedgerEntry({
-        userId,
-        role,
-        type: 'top_up',
-        amountCents: KYC_WELCOME_CREDIT_CENTS,
-        availableDeltaCents: KYC_WELCOME_CREDIT_CENTS,
-        description: KYC_WELCOME_DESCRIPTION,
-      });
-    }
-  }
-
   const wallets = {};
   for (const role of KYC_WELCOME_ROLES) {
-    wallets[role] = mapWallet(await walletRepo.getWallet(userId, role));
+    wallets[role] = mapWallet(await walletRepo.getWalletReadOnly(userId, role));
   }
 
   return {
-    granted: !alreadyGranted,
-    alreadyGranted,
-    amountCents: KYC_WELCOME_CREDIT_CENTS,
+    granted: false,
+    alreadyGranted: false,
+    amountCents: 0,
     roles: KYC_WELCOME_ROLES,
     wallets,
   };
@@ -323,50 +310,87 @@ export async function withdraw(userId, role, amountCents) {
   const stripeService = await import('./stripe.service.js');
   const { pool } = await import('../db/pool.js');
   const { rows } = await pool.query(
-    `SELECT stripe_connect_account_id, email FROM users WHERE id = $1`,
+    `SELECT stripe_connect_account_id FROM users WHERE id = $1`,
     [userId]
   );
-  const user = rows[0];
-  const connectAccountId = user?.stripe_connect_account_id;
+  const connectAccountId = rows[0]?.stripe_connect_account_id;
 
-  if (stripeService.isConfigured() && connectAccountId) {
+  // A linked payout account is mandatory. Without one there is no destination
+  // for the funds, so we must never debit the wallet — block the withdrawal.
+  if (!connectAccountId) {
+    throw new AppError(
+      'Link a payout account before withdrawing',
+      403,
+      'CONNECT_REQUIRED'
+    );
+  }
+
+  // When Stripe is live, the linked account must have finished onboarding
+  // (transfers/payouts enabled) before any money can move.
+  const stripeLive = stripeService.isConfigured();
+  if (stripeLive) {
     const account = await stripeService.getConnectAccount(connectAccountId);
-    if (!account.charges_enabled && !account.payouts_enabled && !account.mock) {
+    const ready = Boolean(account.charges_enabled || account.payouts_enabled);
+    if (!ready) {
       throw new AppError(
         'Complete Stripe Connect onboarding before withdrawing',
         403,
         'CONNECT_NOT_READY'
       );
     }
-    await stripeService.createConnectTransfer({
-      amountCents: cents,
-      destinationAccount: connectAccountId,
-      metadata: { userId, role },
-    });
   }
 
+  // Debit first — appendLedgerEntry enforces the balance atomically, so we can
+  // never transfer more than the user actually holds.
+  let wallet;
+  let entry;
   try {
-    const { wallet, entry } = await walletRepo.appendLedgerEntry({
+    ({ wallet, entry } = await walletRepo.appendLedgerEntry({
       userId,
       role,
       type: 'withdrawal',
       amountCents: cents,
       availableDeltaCents: -cents,
-      description: connectAccountId
-        ? 'Withdrawal via Stripe Connect'
-        : 'Withdrawal (ledger — link Connect for bank payout)',
-    });
-    return {
-      ...mapWallet(wallet),
-      entry: mapLedgerEntry(entry),
-      connectAccountId: connectAccountId || null,
-    };
+      description: 'Withdrawal via Stripe Connect',
+    }));
   } catch (err) {
     if (err.code === 'INSUFFICIENT_BALANCE') {
       throw new AppError('Amount exceeds available balance', 400, 'INSUFFICIENT_BALANCE');
     }
     throw err;
   }
+
+  // Move the money. If the transfer fails, reverse the debit so the balance is
+  // restored — the user is never charged for a payout that did not happen.
+  if (stripeLive) {
+    try {
+      await stripeService.createConnectTransfer({
+        amountCents: cents,
+        destinationAccount: connectAccountId,
+        metadata: { userId, role },
+      });
+    } catch (err) {
+      await walletRepo.appendLedgerEntry({
+        userId,
+        role,
+        type: 'refund',
+        amountCents: cents,
+        availableDeltaCents: cents,
+        description: 'Withdrawal reversed — payout failed',
+      }).catch(() => {});
+      throw new AppError(
+        err.message || 'Payout failed — your balance was not charged',
+        502,
+        'PAYOUT_FAILED'
+      );
+    }
+  }
+
+  return {
+    ...mapWallet(wallet),
+    entry: mapLedgerEntry(entry),
+    connectAccountId,
+  };
 }
 
 export async function getConnectStatus(userId) {
@@ -422,7 +446,7 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet' } 
   const base = /^https:\/\//i.test(configured) ||
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configured)
     ? configured
-    : 'https://wango.toolkitpro.cloud';
+    : 'http://172.31.234.196:3000';
   const returnUrl = `${base}${path}`;
   let link;
   try {

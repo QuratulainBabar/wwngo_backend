@@ -5,7 +5,7 @@ import { AppError } from '../utils/errors.js';
 const TRANSITIONS = {
   posted: ['bid_accepted', 'waiting_receiver', 'cancelled'],
   waiting_receiver: ['bid_accepted', 'cancelled'],
-  bid_accepted: ['ready_for_handoff', 'matched', 'cancelled', 'disputed'],
+  bid_accepted: ['ready_for_handoff', 'matched', 'collected', 'cancelled', 'disputed'],
   matched: ['ready_for_handoff', 'collected', 'cancelled', 'disputed'],
   ready_for_handoff: ['collected', 'cancelled', 'disputed'],
   collected: ['in_transit', 'cancelled', 'disputed'],

@@ -91,9 +91,11 @@ export async function createDeliveryWithPhotos({ delivery, photos }) {
 export async function findDeliveryByIdForSender(deliveryId, senderId) {
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.id = $1 AND d.sender_id = $2`,
     [deliveryId, senderId]
   );
@@ -103,9 +105,11 @@ export async function findDeliveryByIdForSender(deliveryId, senderId) {
 export async function findDeliveryByPublicIdForSender(publicId, senderId) {
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.public_id = $1 AND d.sender_id = $2`,
     [publicId, senderId]
   );
@@ -115,7 +119,12 @@ export async function findDeliveryByPublicIdForSender(publicId, senderId) {
 /** Any participant (sender, traveler, receiver) may read delivery by public id. */
 export async function findDeliveryByPublicIdForUser(publicId, userId) {
   const { rows } = await pool.query(
-    `SELECT d.* FROM deliveries d
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name
+     FROM deliveries d
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.public_id = $1
        AND (
          d.sender_id = $2 OR d.traveler_id = $2 OR d.receiver_id = $2
@@ -129,15 +138,61 @@ export async function findDeliveryByPublicIdForUser(publicId, userId) {
 export async function listDeliveriesForSender(senderId, { limit = 50, offset = 0 } = {}) {
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.sender_id = $1
      ORDER BY d.created_at DESC
      LIMIT $2 OFFSET $3`,
     [senderId, limit, offset]
   );
   return rows;
+}
+
+export async function listDeliveriesForTraveler(travelerId, { limit = 50, offset = 0 } = {}) {
+  const { rows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name
+     FROM deliveries d
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     WHERE d.traveler_id = $1
+     ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
+     LIMIT $2 OFFSET $3`,
+    [travelerId, limit, offset]
+  );
+  return rows;
+}
+
+export async function findDeliveryByIdForTraveler(id, travelerId) {
+  const { rows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name
+     FROM deliveries d
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     WHERE d.id = $1 AND d.traveler_id = $2`,
+    [id, travelerId]
+  );
+  return rows[0] || null;
+}
+
+export async function findDeliveryByPublicIdForTraveler(publicId, travelerId) {
+  const { rows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name
+     FROM deliveries d
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     WHERE d.public_id = $1 AND d.traveler_id = $2`,
+    [publicId, travelerId]
+  );
+  return rows[0] || null;
 }
 
 /** Digits-only + national form (leading zeros stripped) for fuzzy phone match. */
@@ -152,21 +207,19 @@ function phoneMatchParts(phone) {
  * local formats like 0329… vs E.164 +92329…).
  */
 function receiverPhoneMatchSql(digitsParam, nationalParam) {
+  // Uses the precomputed d.receiver_phone_digits column (migration 020) so no
+  // regex runs per row and the equality branches can hit their indexes.
   return `
   ${digitsParam} <> ''
-  AND d.receiver_phone IS NOT NULL
+  AND d.receiver_phone_digits <> ''
   AND (
-    regexp_replace(d.receiver_phone, '\\D', '', 'g') = ${digitsParam}
+    d.receiver_phone_digits = ${digitsParam}
     OR (
       length(${nationalParam}) >= 8
       AND (
-        regexp_replace(regexp_replace(d.receiver_phone, '\\D', '', 'g'), '^0+', '') = ${nationalParam}
-        OR regexp_replace(d.receiver_phone, '\\D', '', 'g') LIKE '%' || ${nationalParam}
-        OR ${digitsParam} LIKE '%' || regexp_replace(
-          regexp_replace(d.receiver_phone, '\\D', '', 'g'),
-          '^0+',
-          ''
-        )
+        regexp_replace(d.receiver_phone_digits, '^0+', '') = ${nationalParam}
+        OR d.receiver_phone_digits LIKE '%' || ${nationalParam}
+        OR ${digitsParam} LIKE '%' || regexp_replace(d.receiver_phone_digits, '^0+', '')
       )
     )
   )
@@ -198,9 +251,11 @@ export async function listDeliveriesForReceiver(
   const access = receiverAccessSql('$1', '$2', '$3', '$4');
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE ${access}
      ORDER BY d.created_at DESC
      LIMIT $5 OFFSET $6`,
@@ -214,9 +269,11 @@ export async function findDeliveryByIdForReceiver(deliveryId, userId, email, pho
   const access = receiverAccessSql('$2', '$3', '$4', '$5');
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.id = $1
        AND (${access})`,
     [deliveryId, userId, email || '', digits, national]
@@ -229,9 +286,11 @@ export async function findDeliveryByPublicIdForReceiver(publicId, userId, email,
   const access = receiverAccessSql('$2', '$3', '$4', '$5');
   const { rows } = await pool.query(
     `SELECT d.*,
-            s.name AS sender_name
+            s.name AS sender_name,
+            t.name AS traveler_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
      WHERE d.public_id = $1
        AND (${access})`,
     [publicId, userId, email || '', digits, national]
@@ -289,16 +348,30 @@ export async function linkReceiverUser(deliveryId, receiverId) {
   return rows[0] || null;
 }
 
-export async function acceptDeliveryAsReceiver(deliveryId, receiverId) {
+export async function acceptDeliveryAsReceiver(
+  deliveryId,
+  receiverId,
+  { receiverFeeCents = 0 } = {}
+) {
+  const feeCents = Math.max(0, Number(receiverFeeCents) || 0);
   const { rows } = await pool.query(
     `UPDATE deliveries
      SET receiver_id = $2,
          receiver_accepted_at = COALESCE(receiver_accepted_at, NOW()),
+         receiver_paid_at = CASE
+           WHEN $3 > 0 THEN COALESCE(receiver_paid_at, NOW())
+           ELSE receiver_paid_at
+         END,
+         receiver_fee_cents = CASE
+           WHEN $3 > 0 THEN $3
+           ELSE receiver_fee_cents
+         END,
+         receiver_payment_due_at = NULL,
          updated_at = NOW()
      WHERE id = $1
        AND status NOT IN ('cancelled', 'delivered')
      RETURNING *`,
-    [deliveryId, receiverId]
+    [deliveryId, receiverId, feeCents]
   );
   return rows[0] || null;
 }

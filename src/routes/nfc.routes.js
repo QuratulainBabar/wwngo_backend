@@ -24,6 +24,7 @@ router.post(
       gpsLat: req.body.gpsLat,
       gpsLng: req.body.gpsLng,
       confirm: req.body.confirm !== false,
+      paymentIntentId: req.body.paymentIntentId || null,
     });
     res.json({ success: true, data: { checkpoint: record } });
   })

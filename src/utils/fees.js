@@ -2,7 +2,9 @@
 
 export const MIN_WALLET_SENDER_CENTS = 200; // $2
 export const MIN_WALLET_RECEIVER_CENTS = 200; // $2
-export const MIN_WALLET_TRAVELER_CENTS = 300; // $3
+export const MIN_WALLET_TRAVELER_CENTS = 200; // $2
+/** Legacy trip listing fee — no longer charged at post (fees at Pay Now). */
+export const TRAVELER_TRIP_LISTING_FEE_CENTS = 300;
 
 export const MAX_TRAVELER_REQUESTS_PER_DELIVERY = 2;
 export const MAX_MEETUP_LOCATIONS = 3;
@@ -11,9 +13,32 @@ export function isDocumentCategory(category) {
   return String(category || '').toLowerCase() === 'documents';
 }
 
-/** Sender pays receiver fee when platform_fee_share > 0. */
+/** Sender covers receiver platform fee when share is 0 (receiver owes nothing). */
 export function senderPaysReceiverFee(delivery) {
-  return Number(delivery?.platform_fee_share ?? delivery?.platformFeeShare ?? 0) > 0;
+  if (delivery?.paysReceiverFee === true) return true;
+  if (delivery?.paysReceiverFee === false) return false;
+  const share = Number(delivery?.platform_fee_share ?? delivery?.platformFeeShare ?? 0);
+  return share <= 0;
+}
+
+export function parsePaysReceiverFee(body = {}) {
+  const raw = body.paysReceiverFee;
+  if (raw === true || raw === 'true' || raw === 1 || raw === '1') return true;
+  if (raw === false || raw === 'false' || raw === 0 || raw === '0') return false;
+  if (body.platformFeeShare != null && body.platformFeeShare !== '') {
+    return Number(body.platformFeeShare) <= 0;
+  }
+  return false;
+}
+
+/** Derive stored platform fee fields from parcel category + sender fee choice. */
+export function resolvePlatformFees(parcelCategory, paysReceiverFee = false) {
+  const pays = Boolean(paysReceiverFee);
+  return {
+    paysReceiverFee: pays,
+    platformFee: senderPlatformFeeCents(parcelCategory, pays) / 100,
+    platformFeeShare: pays ? 0 : receiverPlatformFeeCents(parcelCategory, false) / 100,
+  };
 }
 
 export function senderPlatformFeeCents(category, paysReceiverFee = false) {
@@ -38,5 +63,27 @@ export function travelerHandoffFeeCents(category) {
 export function minWalletCentsForRole(role) {
   const r = String(role || '').toLowerCase();
   if (r === 'traveler') return MIN_WALLET_TRAVELER_CENTS;
+  if (r === 'receiver') return MIN_WALLET_RECEIVER_CENTS;
   return MIN_WALLET_SENDER_CENTS;
+}
+
+/** Minimum sender balance to post a delivery (generic reserve, not platform fee). */
+export function minWalletCentsForSenderCreate(parcelCategory, paysReceiverFee = false) {
+  return MIN_WALLET_SENDER_CENTS;
+}
+
+/**
+ * Minimum receiver balance to accept.
+ * Platform fees are collected at sender Pay Now — not at accept.
+ */
+export function minWalletCentsForReceiverAccept(parcelCategory, paysReceiverFee = false) {
+  return MIN_WALLET_RECEIVER_CENTS;
+}
+
+export function platformFeeDescription(shipmentId) {
+  return `Platform fee for ${shipmentId}`;
+}
+
+export function tripListingFeeDescription(tripPublicId) {
+  return `Trip listing fee for ${tripPublicId}`;
 }

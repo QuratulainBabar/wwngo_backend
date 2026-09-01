@@ -40,7 +40,9 @@ export const getDelivery = asyncHandler(async (req, res) => {
  * Receiver accepts an incoming parcel request.
  */
 export const acceptDelivery = asyncHandler(async (req, res) => {
-  const data = await deliveryService.acceptDeliveryAsReceiver(req.user, req.params.id);
+  const data = await deliveryService.acceptDeliveryAsReceiver(req.user, req.params.id, {
+    paymentIntentId: req.body?.paymentIntentId || null,
+  });
   res.json({ success: true, data });
 });
 

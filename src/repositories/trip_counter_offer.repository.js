@@ -69,7 +69,8 @@ const SENDER_OFFER_SELECT = `
          traveler.name AS traveler_name,
          traveler.rating AS traveler_rating,
          traveler.review_count AS traveler_review_count,
-         traveler.bio AS traveler_bio
+         traveler.bio AS traveler_bio,
+         d.status AS delivery_status
 `;
 
 /**
@@ -196,6 +197,35 @@ export async function updateOfferStatusForSender({
        AND status IN ('pending', 'updated')
      RETURNING *`,
     [offerId, senderId, status]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Force status change (e.g. roll back accepted → pending after escrow failure).
+ * Unlike updateOfferStatusForSender, this is not limited to open offers.
+ */
+export async function forceUpdateOfferStatusForSender({
+  offerId,
+  senderId,
+  status,
+  fromStatuses = null,
+}) {
+  const params = [offerId, senderId, status];
+  let fromClause = '';
+  if (Array.isArray(fromStatuses) && fromStatuses.length > 0) {
+    params.push(fromStatuses);
+    fromClause = `AND status = ANY($${params.length}::trip_counter_offer_status[])`;
+  }
+  const { rows } = await pool.query(
+    `UPDATE trip_counter_offers
+     SET status = $3::trip_counter_offer_status,
+         updated_at = NOW()
+     WHERE id = $1
+       AND sender_id = $2
+       ${fromClause}
+     RETURNING *`,
+    params
   );
   return rows[0] || null;
 }

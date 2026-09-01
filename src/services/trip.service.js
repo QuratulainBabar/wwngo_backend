@@ -1,6 +1,13 @@
 import crypto from 'crypto';
 import { AppError } from '../utils/errors.js';
 import * as tripRepository from '../repositories/trip.repository.js';
+import * as deliveryRepository from '../repositories/delivery.repository.js';
+import * as notificationCreateService from './notification_create.service.js';
+import {
+  destinationsMatch,
+  tripDestination,
+} from '../utils/destination_match.js';
+
 const ALLOWED_TYPES = new Set(['city_to_city', 'country_to_country']);
 const TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL = 24;
 
@@ -203,7 +210,58 @@ export async function createTrip(travelerId, body) {
     throw new AppError('Unable to create trip', 500, 'INTERNAL_ERROR');
   }
 
+  // Fire-and-forget: alert matching senders (posted + receiver-accepted) via FCM.
+  void notifyMatchingSendersForNewTrip(created).catch((err) => {
+    console.error('[trip] matching-sender notify failed:', err?.message || err);
+  });
+
   return mapTrip(created);
+}
+
+/**
+ * When a traveler posts a trip, notify each sender whose open delivery
+ * destination matches this trip (receiver already accepted).
+ */
+async function notifyMatchingSendersForNewTrip(tripRow) {
+  const dest = tripDestination(tripRow);
+  const candidates = await deliveryRepository.listDeliveriesForTripSenderNotification({
+    tripType: tripRow.trip_type,
+    destinationLabel: dest.label,
+    destinationCode: dest.code,
+    excludeSenderId: tripRow.traveler_id,
+    limit: 200,
+  });
+
+  const mapped = mapTrip(tripRow);
+  let notified = 0;
+
+  for (const delivery of candidates) {
+    if (!destinationsMatch(delivery, tripRow)) continue;
+    const senderId = delivery.sender_id;
+    if (!senderId) continue;
+
+    const publicId = delivery.public_id;
+    await notificationCreateService
+      .createNotification({
+        userId: senderId,
+        role: 'sender',
+        type: 'matchingTraveler',
+        title: 'Matching traveler available',
+        body: `A traveler posted a trip on ${mapped.route} that matches your parcel ${publicId}.`,
+        route: `/bid-requests/${publicId}`,
+      })
+      .catch((err) => {
+        console.error(
+          `[trip] notify sender ${senderId} for ${publicId} failed:`,
+          err?.message || err
+        );
+      });
+    notified += 1;
+  }
+
+  if (notified > 0) {
+    console.log(`[trip] ${mapped.publicId} notified ${notified} matching delivery sender(s)`);
+  }
 }
 
 export async function discoverTrips(query = {}) {
