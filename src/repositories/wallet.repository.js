@@ -91,6 +91,44 @@ export async function getShipmentEscrow(shipmentId) {
   return rows[0] || null;
 }
 
+/** True when [userId] is sender, traveler, or receiver on the delivery. */
+export async function userIsPartyToShipment(userId, shipmentId) {
+  const { rows } = await pool.query(
+    `SELECT 1
+     FROM deliveries
+     WHERE public_id = $1
+       AND (sender_id = $2 OR traveler_id = $2 OR receiver_id = $2)
+     LIMIT 1`,
+    [shipmentId, userId]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Active (held / frozen) escrow rows for deliveries this user is a party to
+ * in [role]. Used for wallet display — does not move funds.
+ */
+export async function listRelatedShipmentEscrows(userId, role) {
+  const normalized = normalizeRole(role);
+  const partyClause =
+    normalized === 'traveler'
+      ? 'd.traveler_id = $1'
+      : normalized === 'receiver'
+        ? 'd.receiver_id = $1'
+        : 'd.sender_id = $1';
+
+  const { rows } = await pool.query(
+    `SELECT se.shipment_id, se.amount_cents, se.status, se.role
+     FROM shipment_escrows se
+     INNER JOIN deliveries d ON d.public_id = se.shipment_id
+     WHERE ${partyClause}
+       AND se.status IN ('held', 'frozen')
+     ORDER BY se.updated_at DESC`,
+    [userId]
+  );
+  return rows;
+}
+
 /**
  * Append a ledger row and update wallet balances atomically.
  * Returns { wallet, entry }.

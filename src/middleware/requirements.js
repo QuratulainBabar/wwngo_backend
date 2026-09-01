@@ -4,7 +4,6 @@ import * as walletRepo from '../repositories/wallet.repository.js';
 import {
   minWalletCentsForRole,
   minWalletCentsForSenderCreate,
-  parsePaysReceiverFee,
 } from '../utils/fees.js';
 
 export const MIN_WALLET_RESERVE_CENTS = 200; // $2.00 default (sender/receiver)
@@ -56,14 +55,14 @@ export function requireWalletMinimum(role = 'traveler') {
   };
 }
 
-/** After multipart body is parsed — sender min depends on parcel category + fee choice. */
+/**
+ * Sender create-time wallet check only — never debit platform fees here.
+ * Document/object fees ($2/$4, or $3/$6 when paying 100%) are collected at Pay Now.
+ */
 export function requireSenderWalletForDeliveryCreate(req, _res, next) {
   (async () => {
     try {
-      const body = req.body || {};
-      const paysReceiver = parsePaysReceiverFee(body);
-      const category = String(body.parcelCategory || 'documents').trim() || 'documents';
-      const minCents = minWalletCentsForSenderCreate(category, paysReceiver);
+      const minCents = minWalletCentsForSenderCreate();
       const wallet = await walletRepo.getWallet(req.user.id, 'sender');
       if (Number(wallet.available_cents) < minCents) {
         return next(

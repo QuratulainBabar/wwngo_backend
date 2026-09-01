@@ -117,15 +117,18 @@ export async function insertMessage({
   body,
   isImage = false,
   imageName = null,
+  deliveredAt = null,
+  readAt = null,
 }) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `INSERT INTO chat_messages (conversation_id, sender_id, body, is_image, image_name)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO chat_messages
+         (conversation_id, sender_id, body, is_image, image_name, delivered_at, read_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [conversationId, senderId, body || '', isImage, imageName]
+      [conversationId, senderId, body || '', isImage, imageName, deliveredAt, readAt]
     );
     await client.query(
       `UPDATE conversations SET updated_at = NOW() WHERE id = $1`,
@@ -156,6 +159,63 @@ export async function markConversationRead(conversationId, userId) {
      DO UPDATE SET last_read_at = NOW()`,
     [conversationId, userId]
   );
+}
+
+/**
+ * Mark every undelivered message addressed to [userId] as delivered.
+ * Returns rows grouped by conversation for socket fan-out.
+ */
+export async function markDeliveredForRecipient(userId) {
+  const { rows } = await pool.query(
+    `UPDATE chat_messages m
+     SET delivered_at = NOW()
+     FROM conversations c
+     WHERE m.conversation_id = c.id
+       AND (c.participant_a_id = $1 OR c.participant_b_id = $1)
+       AND m.sender_id <> $1
+       AND m.delivered_at IS NULL
+     RETURNING m.id, m.conversation_id, m.sender_id`,
+    [userId]
+  );
+  return rows;
+}
+
+/**
+ * Mark a single message delivered when the recipient device ACKs it.
+ * No-op (empty) if the caller is not the other participant or it was already delivered.
+ */
+export async function markMessageDelivered(messageId, recipientId) {
+  const { rows } = await pool.query(
+    `UPDATE chat_messages m
+     SET delivered_at = NOW()
+     FROM conversations c
+     WHERE m.id = $1
+       AND m.conversation_id = c.id
+       AND m.sender_id <> $2
+       AND (c.participant_a_id = $2 OR c.participant_b_id = $2)
+       AND m.delivered_at IS NULL
+     RETURNING m.id, m.conversation_id, m.sender_id`,
+    [messageId, recipientId]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Mark every unread peer message in a thread as read (and delivered if not yet).
+ * Returns the updated message ids and the original sender id.
+ */
+export async function markMessagesRead(conversationId, readerId) {
+  const { rows } = await pool.query(
+    `UPDATE chat_messages
+     SET delivered_at = COALESCE(delivered_at, NOW()),
+         read_at = NOW()
+     WHERE conversation_id = $1
+       AND sender_id <> $2
+       AND read_at IS NULL
+     RETURNING id, sender_id`,
+    [conversationId, readerId]
+  );
+  return rows;
 }
 
 export async function setConversationUnlocked(deliveryId, threadType, unlocked = true) {

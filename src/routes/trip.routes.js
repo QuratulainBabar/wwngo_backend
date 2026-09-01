@@ -5,7 +5,7 @@ import { requireKycApproved, requireWalletMinimum, requireFullyVerified } from '
 
 const router = Router();
 
-router.post('/', authenticate, requireKycApproved, requireWalletMinimum('traveler'), tripController.createTrip);
+router.post('/', authenticate, requireKycApproved, tripController.createTrip);
 router.get('/discover', authenticate, tripController.discoverTrips);
 router.get('/discover/:id', authenticate, tripController.getDiscoverableTrip);
 router.get(

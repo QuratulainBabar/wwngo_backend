@@ -42,7 +42,11 @@ function requireRole(role) {
 
 export async function listForUser(userId, role, query = {}) {
   const normalized = requireRole(role);
-  const limit = Math.min(Number(query.limit) || 50, 100);
+  const limit = Math.min(
+    Number(query.limit) || notificationRepository.INBOX_KEEP,
+    notificationRepository.INBOX_KEEP
+  );
+  await notificationRepository.trimInbox(userId, normalized);
   const rows = await notificationRepository.listNotifications(userId, normalized, { limit });
   return rows.map(mapNotification);
 }

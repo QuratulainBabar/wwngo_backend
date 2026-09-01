@@ -31,6 +31,8 @@ export async function createNotification({
   // ever alerted once per parcel, even under concurrent list fetches.
   if (!row) return null;
 
+  await notificationRepository.trimInbox(normalizedUserId, normalizedRole);
+
   const notification = mapNotification(row);
   const unreadCount = await notificationRepository.countUnread(
     normalizedUserId,

@@ -1,5 +1,8 @@
 import { pool } from '../db/pool.js';
 
+/** Keep only the newest notifications per user + role. */
+export const INBOX_KEEP = 20;
+
 export async function createNotification({
   userId,
   role,
@@ -24,7 +27,24 @@ export async function createNotification({
   return rows[0] || null;
 }
 
-export async function listNotifications(userId, role, { limit = 50 } = {}) {
+/** Drop oldest inbox rows so only the newest [keep] remain. */
+export async function trimInbox(userId, role, keep = INBOX_KEEP) {
+  await pool.query(
+    `DELETE FROM notifications
+     WHERE id IN (
+       SELECT id FROM (
+         SELECT id,
+                ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS rn
+         FROM notifications
+         WHERE user_id = $1 AND role = $2
+       ) ranked
+       WHERE rn > $3
+     )`,
+    [userId, role, keep]
+  );
+}
+
+export async function listNotifications(userId, role, { limit = INBOX_KEEP } = {}) {
   const { rows } = await pool.query(
     `SELECT * FROM notifications
      WHERE user_id = $1 AND role = $2
@@ -38,9 +58,15 @@ export async function listNotifications(userId, role, { limit = 50 } = {}) {
 export async function countUnread(userId, role) {
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS count
-     FROM notifications
-     WHERE user_id = $1 AND role = $2 AND unread = TRUE`,
-    [userId, role]
+     FROM (
+       SELECT unread
+       FROM notifications
+       WHERE user_id = $1 AND role = $2
+       ORDER BY created_at DESC, id DESC
+       LIMIT $3
+     ) latest
+     WHERE unread = TRUE`,
+    [userId, role, INBOX_KEEP]
   );
   return Number(rows[0]?.count) || 0;
 }

@@ -48,7 +48,6 @@ export async function listTripsForTraveler(travelerId, { limit = 50, offset = 0 
      FROM trips t
      LEFT JOIN users u ON u.id = t.traveler_id
      WHERE t.traveler_id = $1
-       AND t.status <> 'cancelled'
      ORDER BY t.created_at DESC
      LIMIT $2 OFFSET $3`,
     [travelerId, limit, offset]

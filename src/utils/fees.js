@@ -3,8 +3,6 @@
 export const MIN_WALLET_SENDER_CENTS = 200; // $2
 export const MIN_WALLET_RECEIVER_CENTS = 200; // $2
 export const MIN_WALLET_TRAVELER_CENTS = 200; // $2
-/** Legacy trip listing fee — no longer charged at post (fees at Pay Now). */
-export const TRAVELER_TRIP_LISTING_FEE_CENTS = 300;
 
 export const MAX_TRAVELER_REQUESTS_PER_DELIVERY = 2;
 export const MAX_MEETUP_LOCATIONS = 3;
@@ -67,8 +65,14 @@ export function minWalletCentsForRole(role) {
   return MIN_WALLET_SENDER_CENTS;
 }
 
-/** Minimum sender balance to post a delivery (generic reserve, not platform fee). */
-export function minWalletCentsForSenderCreate(parcelCategory, paysReceiverFee = false) {
+/**
+ * Minimum sender balance to post a delivery.
+ * Must not use senderPlatformFeeCents — posting does not debit $2/$4/$3/$6.
+ */
+export function minWalletCentsForSenderCreate(
+  _parcelCategory = 'documents',
+  _paysReceiverFee = false
+) {
   return MIN_WALLET_SENDER_CENTS;
 }
 
@@ -82,8 +86,4 @@ export function minWalletCentsForReceiverAccept(parcelCategory, paysReceiverFee 
 
 export function platformFeeDescription(shipmentId) {
   return `Platform fee for ${shipmentId}`;
-}
-
-export function tripListingFeeDescription(tripPublicId) {
-  return `Trip listing fee for ${tripPublicId}`;
 }

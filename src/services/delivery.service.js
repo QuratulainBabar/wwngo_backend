@@ -455,7 +455,8 @@ export async function createDelivery(senderId, body, files) {
       let mapped = mapDelivery(delivery, photos);
       const senderName = await loadSenderName(senderId);
 
-      // Platform fees are collected when the sender pays (Pay Now) — not at post.
+      // Do not debit sender platform fees here (documents $2 / objects $4,
+      // or $3 / $6 when the sender pays 100%). Those are collected at Pay Now.
       // receiver lists update even if SMTP is slow/down (Flutter times out at 20s).
       try {
         const receiverUserId =

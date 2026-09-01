@@ -48,23 +48,48 @@ function mapWallet(row) {
   };
 }
 
+function mapShipmentEscrow(row) {
+  return {
+    shipmentId: row.shipment_id,
+    amountCents: Number(row.amount_cents),
+    status: row.status,
+    role: row.role || null,
+  };
+}
+
 /**
  * Wallet summary for the authenticated user + role.
  * Always returns zeros when no activity exists (new user).
+ *
+ * Traveler / receiver wallets do not hold escrow funds (those sit on the
+ * sender wallet). Their `escrowCents` is the sum of related shipment escrow
+ * so all three role UIs can show the same live amount.
  */
 export async function getWalletSummary(userId, role, { recentLimit = 6 } = {}) {
-  // Read-only + parallel: a wallet view shouldn't write, and the two reads are
+  const normalized = walletRepo.normalizeRole(role);
+  // Read-only + parallel: a wallet view shouldn't write, and the reads are
   // independent.
-  const [wallet, recent] = await Promise.all([
-    walletRepo.getWalletReadOnly(userId, role),
-    walletRepo.listLedgerEntries(userId, role, {
+  const [wallet, recent, relatedEscrows] = await Promise.all([
+    walletRepo.getWalletReadOnly(userId, normalized),
+    walletRepo.listLedgerEntries(userId, normalized, {
       limit: recentLimit,
       includeHidden: false,
     }),
+    walletRepo.listRelatedShipmentEscrows(userId, normalized),
   ]);
 
+  const relatedEscrowCents = relatedEscrows.reduce(
+    (sum, row) => sum + Number(row.amount_cents),
+    0
+  );
+  const escrowCents =
+    normalized === 'sender'
+      ? Number(wallet.escrow_cents)
+      : relatedEscrowCents;
+
   return {
-    ...mapWallet(wallet),
+    ...mapWallet({ ...wallet, escrow_cents: escrowCents }),
+    shipmentEscrows: relatedEscrows.map(mapShipmentEscrow),
     recentTransactions: recent.map(mapLedgerEntry),
   };
 }
@@ -82,13 +107,25 @@ export async function listTransactions(userId, role, { limit = 50 } = {}) {
 
 export async function getShipmentEscrow(userId, shipmentId) {
   const row = await walletRepo.getShipmentEscrow(shipmentId);
-  if (!row || row.user_id !== userId) {
+  if (!row) {
     return {
       shipmentId,
       amountCents: 0,
       status: 'none',
     };
   }
+
+  const isFunder = row.user_id === userId;
+  const isParty =
+    isFunder || (await walletRepo.userIsPartyToShipment(userId, shipmentId));
+  if (!isParty) {
+    return {
+      shipmentId,
+      amountCents: 0,
+      status: 'none',
+    };
+  }
+
   return {
     shipmentId: row.shipment_id,
     amountCents: Number(row.amount_cents),
