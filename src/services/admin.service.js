@@ -454,10 +454,10 @@ export async function getUserDetail(userId) {
   if (!user) throw new AppError('User not found', 404, 'NOT_FOUND');
 
   const { rows: wallets } = await pool.query(
-    `SELECT role, available_cents, escrow_cents, updated_at
+    `SELECT available_cents, escrow_cents, updated_at
      FROM wallets
      WHERE user_id = $1
-     ORDER BY role`,
+     LIMIT 1`,
     [user.id]
   );
 

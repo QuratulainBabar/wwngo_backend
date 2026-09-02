@@ -94,8 +94,15 @@ export async function recordCheckpoint({
     try {
       await applyCheckpointEffects(delivery, checkpoint, userId, { paymentIntentId });
     } catch (err) {
+      await pool.query(
+        `UPDATE nfc_checkpoints SET
+           confirmer_id = NULL,
+           confirmed_at = NULL
+         WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
+        [deliveryId, checkpoint]
+      );
       console.error(
-        `[nfc] checkpoint ${checkpoint} confirmed but effects failed for ${delivery.public_id}:`,
+        `[nfc] checkpoint ${checkpoint} effects failed for ${delivery.public_id} — rolled back confirmation:`,
         err?.message || err
       );
       throw err;
@@ -137,7 +144,18 @@ async function applyCheckpointEffects(delivery, checkpoint, userId, options = {}
   const publicId = delivery.public_id;
 
   if (checkpoint === 'handoff_sender_traveler') {
-    // Traveler handoff fee is charged at bid accept — NFC CP1 only confirms handoff.
+    if (delivery.traveler_id) {
+      await escrowService.chargeTravelerHandoffFee(
+        delivery.traveler_id,
+        publicId,
+        delivery.parcel_category,
+        {
+          paymentIntentId: options.paymentIntentId || null,
+          allowPaymentRequired: true,
+        }
+      );
+    }
+
     await deliveryState.transitionDelivery({
       deliveryId: delivery.id,
       toStatus: 'collected',
@@ -214,6 +232,32 @@ async function applyCheckpointEffects(delivery, checkpoint, userId, options = {}
         route: `/shipment/${publicId}`,
       })
       .catch(() => {});
+
+    if (delivery.traveler_id) {
+      await notificationCreateService
+        .createNotification({
+          userId: delivery.traveler_id,
+          role: 'traveler',
+          type: 'deliveryStatus',
+          title: 'Leave a review',
+          body: `Parcel ${publicId} was delivered. Rate your experience with the receiver.`,
+          route: `/delivery-review?shipmentId=${encodeURIComponent(publicId)}&role=traveler`,
+        })
+        .catch(() => {});
+    }
+
+    if (delivery.receiver_id) {
+      await notificationCreateService
+        .createNotification({
+          userId: delivery.receiver_id,
+          role: 'receiver',
+          type: 'deliveryStatus',
+          title: 'Delivery complete',
+          body: `Parcel ${publicId} was delivered successfully. You can leave a review for the traveler.`,
+          route: `/delivery-review?shipmentId=${encodeURIComponent(publicId)}&role=receiver`,
+        })
+        .catch(() => {});
+    }
   }
 }
 

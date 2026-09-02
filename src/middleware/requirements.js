@@ -38,7 +38,7 @@ export function requireWalletMinimum(role = 'traveler') {
   return async (req, _res, next) => {
     try {
       const minCents = minWalletCentsForRole(role);
-      const wallet = await walletRepo.getWallet(req.user.id, role);
+      const wallet = await walletRepo.getWallet(req.user.id);
       if (Number(wallet.available_cents) < minCents) {
         return next(
           new AppError(
@@ -63,7 +63,7 @@ export function requireSenderWalletForDeliveryCreate(req, _res, next) {
   (async () => {
     try {
       const minCents = minWalletCentsForSenderCreate();
-      const wallet = await walletRepo.getWallet(req.user.id, 'sender');
+      const wallet = await walletRepo.getWallet(req.user.id);
       if (Number(wallet.available_cents) < minCents) {
         return next(
           new AppError(

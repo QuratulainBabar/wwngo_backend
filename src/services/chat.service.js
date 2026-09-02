@@ -51,11 +51,21 @@ function formatInboxTime(date) {
 function mapConversation(row) {
   const peerName = row.peer_name || 'Contact';
   const initial = peerName.trim().charAt(0).toUpperCase() || '?';
+  const rawLast = String(row.last_message || '').trim();
+  const lastIsImage =
+    Boolean(row.last_message_is_image) ||
+    rawLast === '[Image]' ||
+    rawLast === '📷 Photo' ||
+    rawLast.toLowerCase() === 'photo';
+  const lastMessage = lastIsImage
+      ? '📷 Photo'
+      : rawLast || 'No messages yet';
   return {
     id: row.id,
     name: peerName,
     initial,
-    lastMessage: row.last_message || 'No messages yet',
+    lastMessage,
+    lastMessageIsImage: lastIsImage,
     time: formatInboxTime(row.last_message_at || row.updated_at),
     lastMessageAt: toIso(row.last_message_at || row.updated_at),
     shipmentId: row.delivery_public_id || '',
@@ -196,7 +206,7 @@ export async function sendMessage(userId, conversationId, body) {
   const message = await chatRepository.insertMessage({
     conversationId,
     senderId: userId,
-    body: text || (imageUrl ? '[Image]' : ''),
+    body: text || (imageUrl ? 'Photo' : ''),
     isImage: Boolean(imageUrl),
     imageName: imageUrl,
     deliveredAt: online ? now : null,

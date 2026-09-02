@@ -3,10 +3,7 @@ import { AppError } from '../utils/errors.js';
 import * as walletRepo from '../repositories/wallet.repository.js';
 import * as stripeService from './stripe.service.js';
 import {
-  senderPaysReceiverFee,
-  senderPlatformFeeCents,
-  receiverPlatformFeeCents,
-  travelerPlatformFeeCents,
+  resolveSenderPlatformFeeCents,
   travelerHandoffFeeCents,
   platformFeeDescription,
 } from '../utils/fees.js';
@@ -38,7 +35,7 @@ export async function chargeWalletOrCard({
     await walletService.confirmTopUp(userId, paymentIntentId);
   }
 
-  const wallet = await walletRepo.getWallet(userId, role);
+  const wallet = await walletRepo.getWallet(userId);
   const available = Number(wallet.available_cents);
   const shortfall = cents - available;
 
@@ -131,9 +128,7 @@ export async function holdEscrowForDelivery({
     throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   }
 
-  const paysReceiver = senderPaysReceiverFee(delivery);
-  const category = delivery.parcel_category;
-  const senderFee = senderPlatformFeeCents(category, paysReceiver);
+  const senderFee = resolveSenderPlatformFeeCents(delivery);
   const senderFeeAlreadyPaid = await hasPlatformFeePaid(
     senderId,
     'sender',
@@ -148,7 +143,7 @@ export async function holdEscrowForDelivery({
     await walletService.confirmTopUp(senderId, paymentIntentId);
   }
 
-  const wallet = await walletRepo.getWallet(senderId, 'sender');
+  const wallet = await walletRepo.getWallet(senderId);
   const available = Number(wallet.available_cents);
   const shortfall = totalNeeded - available;
 
@@ -225,13 +220,6 @@ export async function holdEscrowForDelivery({
       [deliveryPublicId, senderId, amountCents, stripePaymentIntentId]
     );
 
-    const receiverFee = receiverPlatformFeeCents(category, paysReceiver);
-    const receiverId = delivery.receiver_id;
-    const receiverFeeAlreadyPaid =
-      !receiverId ||
-      delivery.receiver_paid_at ||
-      (await hasPlatformFeePaid(receiverId, 'receiver', deliveryPublicId, 'Platform fee'));
-
     if (!senderFeeAlreadyPaid) {
       await chargeWalletOrCard({
         userId: senderId,
@@ -243,33 +231,8 @@ export async function holdEscrowForDelivery({
       });
     }
 
-    if (receiverId && receiverFee > 0 && !receiverFeeAlreadyPaid) {
-      await chargeWalletOrCard({
-        userId: receiverId,
-        role: 'receiver',
-        amountCents: receiverFee,
-        description: platformFeeDescription(deliveryPublicId),
-        shipmentId: deliveryPublicId,
-        allowPaymentRequired: false,
-      });
-      await pool.query(
-        `UPDATE deliveries
-         SET receiver_paid_at = NOW(),
-             receiver_fee_cents = $2,
-             receiver_payment_due_at = NULL,
-             updated_at = NOW()
-         WHERE public_id = $1`,
-        [deliveryPublicId, receiverFee]
-      );
-    }
-
-    // Traveler handoff fee is locked at bid accept (not at NFC CP1).
-    const travelerId = delivery.traveler_id;
-    if (travelerId) {
-      await chargeTravelerHandoffFee(travelerId, deliveryPublicId, category, {
-        allowPaymentRequired: false,
-      });
-    }
+    // Receiver platform fee ($2 docs / $3 objects) is charged at receiver accept.
+    // Traveler platform fee ($2 docs / $4 objects) is charged at NFC CP1 handoff.
 
     return { shipmentId: deliveryPublicId, amountCents, status: 'held', stripePaymentIntentId };
   } catch (err) {
@@ -459,14 +422,14 @@ export async function freezeEscrowForDelivery(deliveryPublicId) {
 }
 
 /**
- * Traveler handoff fee — charged at sender bid accept / booking lock.
- * Safe to call again (skips if already paid). NFC CP1 no longer charges this.
+ * Traveler platform fee ($2 documents / $4 objects) — charged at NFC CP1 handoff.
+ * Safe to call again (skips if already paid).
  */
 export async function chargeTravelerHandoffFee(
   travelerId,
   deliveryPublicId,
   parcelCategory,
-  { paymentIntentId = null, allowPaymentRequired = false } = {}
+  { paymentIntentId = null, allowPaymentRequired = true } = {}
 ) {
   const alreadyPaid =
     (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Platform fee')) ||
@@ -485,7 +448,7 @@ export async function chargeTravelerHandoffFee(
     userId: travelerId,
     role: 'traveler',
     amountCents: feeCents,
-    description: `Handoff fee for ${deliveryPublicId}`,
+    description: platformFeeDescription(deliveryPublicId),
     shipmentId: deliveryPublicId,
     allowPaymentRequired,
   });

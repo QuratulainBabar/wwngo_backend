@@ -177,6 +177,33 @@ export async function cancelTripAsTraveler(tripId, travelerId) {
 }
 
 /**
+ * Advance linked trip status when a delivery moves to in_transit or delivered.
+ * Uses the same DB client when called inside an open transaction.
+ */
+export async function syncTripStatusForDelivery(deliveryId, tripStatus, client = pool) {
+  const status = String(tripStatus || '').trim();
+  if (!['in_transit', 'delivered'].includes(status)) return null;
+
+  const allowedCurrent =
+    status === 'in_transit'
+      ? `('open_bid')`
+      : `('open_bid', 'in_transit')`;
+
+  const { rows } = await client.query(
+    `UPDATE trips t
+     SET status = $2::trip_status,
+         updated_at = NOW()
+     FROM deliveries d
+     WHERE d.id = $1
+       AND d.trip_id = t.id
+       AND t.status IN ${allowedCurrent}
+     RETURNING t.*`,
+    [deliveryId, status]
+  );
+  return rows[0] || null;
+}
+
+/**
  * Count of pending sender match requests against this trip.
  */
 export async function countMatchingRequestsForTrip(tripId) {

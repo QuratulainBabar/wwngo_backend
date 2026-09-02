@@ -92,10 +92,12 @@ export async function findDeliveryByIdForSender(deliveryId, senderId) {
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.id = $1 AND d.sender_id = $2`,
     [deliveryId, senderId]
   );
@@ -106,10 +108,12 @@ export async function findDeliveryByPublicIdForSender(publicId, senderId) {
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.public_id = $1 AND d.sender_id = $2`,
     [publicId, senderId]
   );
@@ -121,10 +125,12 @@ export async function findDeliveryByPublicIdForUser(publicId, userId) {
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.public_id = $1
        AND (
          d.sender_id = $2 OR d.traveler_id = $2 OR d.receiver_id = $2
@@ -139,10 +145,12 @@ export async function listDeliveriesForSender(senderId, { limit = 50, offset = 0
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.sender_id = $1
      ORDER BY d.created_at DESC
      LIMIT $2 OFFSET $3`,
@@ -155,10 +163,12 @@ export async function listDeliveriesForTraveler(travelerId, { limit = 50, offset
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.traveler_id = $1
      ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
      LIMIT $2 OFFSET $3`,
@@ -171,10 +181,12 @@ export async function findDeliveryByIdForTraveler(id, travelerId) {
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.id = $1 AND d.traveler_id = $2`,
     [id, travelerId]
   );
@@ -185,10 +197,12 @@ export async function findDeliveryByPublicIdForTraveler(publicId, travelerId) {
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.public_id = $1 AND d.traveler_id = $2`,
     [publicId, travelerId]
   );
@@ -252,10 +266,12 @@ export async function listDeliveriesForReceiver(
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE ${access}
      ORDER BY d.created_at DESC
      LIMIT $5 OFFSET $6`,
@@ -270,10 +286,12 @@ export async function findDeliveryByIdForReceiver(deliveryId, userId, email, pho
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.id = $1
        AND (${access})`,
     [deliveryId, userId, email || '', digits, national]
@@ -287,10 +305,12 @@ export async function findDeliveryByPublicIdForReceiver(publicId, userId, email,
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
-            t.name AS traveler_name
+            t.name AS traveler_name,
+            r.name AS receiver_name
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.public_id = $1
        AND (${access})`,
     [publicId, userId, email || '', digits, national]

@@ -6,18 +6,21 @@ import { asyncHandler } from '../utils/errors.js';
  * Returns available + escrow balances and a short transaction summary.
  */
 export const getWallet = asyncHandler(async (req, res) => {
-  const data = await walletService.getWalletSummary(req.user.id, req.query.role, {
+  const data = await walletService.getWalletSummary(req.user.id, {
     recentLimit: Number(req.query.recentLimit) || 6,
+    activityRole: req.query.role || null,
   });
   res.json({ success: true, data });
 });
 
 /**
- * GET /api/v1/wallet/transactions?role=sender
+ * GET /api/v1/wallet/transactions
+ * Optional ?role= filters by activity tag on each ledger row.
  */
 export const listTransactions = asyncHandler(async (req, res) => {
-  const data = await walletService.listTransactions(req.user.id, req.query.role, {
+  const data = await walletService.listTransactions(req.user.id, {
     limit: Number(req.query.limit) || 50,
+    activityRole: req.query.role || null,
   });
   res.json({ success: true, data });
 });

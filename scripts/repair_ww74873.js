@@ -51,7 +51,7 @@ async function main() {
   );
   const totalNeeded = amountCents + senderFee;
 
-  const wallet = await walletRepo.getWallet(delivery.sender_id, 'sender');
+  const wallet = await walletRepo.getWallet(delivery.sender_id);
   const available = Number(wallet.available_cents);
   const shortfall = totalNeeded - available;
 

@@ -31,7 +31,7 @@ async function main() {
 
   const role = walletRepo.normalizeRole(roleArg || user.role || 'sender');
 
-  const before = await walletRepo.getWallet(user.id, role);
+  const before = await walletRepo.getWallet(user.id);
   const { wallet } = await walletRepo.appendLedgerEntry({
     userId: user.id,
     role,

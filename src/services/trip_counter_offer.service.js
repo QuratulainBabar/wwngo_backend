@@ -407,7 +407,7 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
   const tripId = mapped.tripId || rawRow.trip_id;
   const amount = Number(mapped.amount) || Number(rawRow.amount) || 0;
 
-  // Assign traveler before escrow so platform fees can charge the traveler wallet.
+  // Assign traveler before escrow; traveler platform fee is charged at NFC CP1 handoff.
   await pool.query(
     `UPDATE deliveries
      SET traveler_id = $2, trip_id = $3, bid_amount = $4, updated_at = NOW()

@@ -1,3 +1,4 @@
+import { pool } from '../db/pool.js';
 import * as reviewRepository from '../repositories/review.repository.js';
 import { AppError } from '../utils/errors.js';
 import { normalizeRole } from '../repositories/wallet.repository.js';
@@ -29,6 +30,116 @@ function mapReview(row) {
     role: row.role,
     createdAt: row.created_at,
   };
+}
+
+function sameId(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
+/**
+ * Ensure the reviewer/reviewee pair is valid for this shipment and role.
+ * Allowed:
+ *   sender → traveler
+ *   traveler → receiver
+ *   receiver → traveler
+ */
+async function assertValidReviewPair({
+  reviewerId,
+  revieweeId,
+  role,
+  shipmentId,
+}) {
+  if (!shipmentId) {
+    throw new AppError(
+      'shipmentId is required to submit a delivery review',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const { rows } = await pool.query(
+    `SELECT id, public_id, status, sender_id, traveler_id, receiver_id
+     FROM deliveries
+     WHERE public_id = $1 OR id::text = $1
+     LIMIT 1`,
+    [shipmentId]
+  );
+  const delivery = rows[0];
+  if (!delivery) {
+    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+  }
+
+  const isParty =
+    sameId(delivery.sender_id, reviewerId) ||
+    sameId(delivery.traveler_id, reviewerId) ||
+    sameId(delivery.receiver_id, reviewerId);
+  if (!isParty) {
+    throw new AppError(
+      'You can only review parties on your own deliveries',
+      403,
+      'FORBIDDEN'
+    );
+  }
+
+  if (role === 'traveler') {
+    if (!sameId(delivery.traveler_id, revieweeId)) {
+      throw new AppError(
+        'Reviewee must be the traveler for this delivery',
+        400,
+        'INVALID_REVIEWEE'
+      );
+    }
+    const allowed =
+      sameId(delivery.sender_id, reviewerId) ||
+      sameId(delivery.receiver_id, reviewerId);
+    if (!allowed) {
+      throw new AppError(
+        'Only the sender or receiver can review the traveler',
+        403,
+        'FORBIDDEN'
+      );
+    }
+    return delivery;
+  }
+
+  if (role === 'receiver') {
+    if (!sameId(delivery.receiver_id, revieweeId)) {
+      throw new AppError(
+        'Reviewee must be the receiver for this delivery',
+        400,
+        'INVALID_REVIEWEE'
+      );
+    }
+    if (!sameId(delivery.traveler_id, reviewerId)) {
+      throw new AppError(
+        'Only the traveler can review the receiver',
+        403,
+        'FORBIDDEN'
+      );
+    }
+    return delivery;
+  }
+
+  if (role === 'sender') {
+    if (!sameId(delivery.sender_id, revieweeId)) {
+      throw new AppError(
+        'Reviewee must be the sender for this delivery',
+        400,
+        'INVALID_REVIEWEE'
+      );
+    }
+    // Keep traveler→sender allowed for backwards compatibility if used.
+    if (!sameId(delivery.traveler_id, reviewerId)) {
+      throw new AppError(
+        'Only the traveler can review the sender',
+        403,
+        'FORBIDDEN'
+      );
+    }
+    return delivery;
+  }
+
+  throw new AppError('Invalid review role', 400, 'VALIDATION_ERROR');
 }
 
 /**
@@ -66,6 +177,13 @@ export async function createReview(reviewerId, payload) {
   if (!text) {
     throw new AppError('Review text is required', 400, 'VALIDATION_ERROR');
   }
+
+  await assertValidReviewPair({
+    reviewerId,
+    revieweeId,
+    role,
+    shipmentId,
+  });
 
   try {
     const row = await reviewRepository.createReview({

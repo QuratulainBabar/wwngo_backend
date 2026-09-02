@@ -256,8 +256,14 @@ export async function listSenderRequestsForTrip(travelerId, tripIdOrPublicId) {
 }
 
 export async function getSenderRequestForTraveler(travelerId, requestId) {
-  const row = await requestRepository.findPendingRequestForTraveler(requestId, travelerId);
+  // Include accepted requests so traveler UI can keep Accept / Counter button
+  // states correct after responding (pending-only lookup would 404).
+  const row = await requestRepository.findRequestForTraveler(requestId, travelerId);
   if (!row) throw new AppError('Sender request not found', 404, 'NOT_FOUND');
+  const status = String(row.status || '').toLowerCase();
+  if (!['pending', 'accepted'].includes(status)) {
+    throw new AppError('Sender request not found', 404, 'NOT_FOUND');
+  }
   return mapSenderRequest(row);
 }
 

@@ -45,9 +45,25 @@ export function senderPlatformFeeCents(category, paysReceiverFee = false) {
   return doc ? 200 : 400;
 }
 
+/**
+ * Sender platform fee for a delivery row — uses stored platform_fee when valid,
+ * otherwise recomputes from category + receiver-fee choice.
+ *
+ * Sender pays receiver fee: $3 documents / $6 objects.
+ * Sender does not pay receiver fee: $2 documents / $4 objects.
+ */
+export function resolveSenderPlatformFeeCents(delivery) {
+  const paysReceiver = senderPaysReceiverFee(delivery);
+  const category = delivery?.parcel_category ?? delivery?.parcelCategory ?? 'documents';
+  const expected = senderPlatformFeeCents(category, paysReceiver);
+  const stored = Math.round(Number(delivery?.platform_fee ?? delivery?.platformFee ?? 0) * 100);
+  if (stored > 0 && stored === expected) return stored;
+  return expected;
+}
+
 export function receiverPlatformFeeCents(category, paysReceiverFee = false) {
   if (paysReceiverFee) return 0;
-  return isDocumentCategory(category) ? 200 : 400;
+  return isDocumentCategory(category) ? 200 : 300;
 }
 
 export function travelerPlatformFeeCents(category) {
@@ -78,10 +94,11 @@ export function minWalletCentsForSenderCreate(
 
 /**
  * Minimum receiver balance to accept.
- * Platform fees are collected at sender Pay Now — not at accept.
+ * When the receiver owes a platform fee, that amount is required; otherwise $2 minimum.
  */
 export function minWalletCentsForReceiverAccept(parcelCategory, paysReceiverFee = false) {
-  return MIN_WALLET_RECEIVER_CENTS;
+  const fee = receiverPlatformFeeCents(parcelCategory, paysReceiverFee);
+  return fee > 0 ? fee : MIN_WALLET_RECEIVER_CENTS;
 }
 
 export function platformFeeDescription(shipmentId) {

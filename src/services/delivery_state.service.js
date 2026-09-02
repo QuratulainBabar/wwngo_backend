@@ -85,6 +85,11 @@ export async function transitionDelivery({
       [deliveryId, fromStatus, toStatus, actorId, note]
     );
 
+    if (toStatus === 'in_transit' || toStatus === 'delivered') {
+      const tripRepo = await import('../repositories/trip.repository.js');
+      await tripRepo.syncTripStatusForDelivery(deliveryId, toStatus, client);
+    }
+
     await client.query('COMMIT');
     return updated[0];
   } catch (err) {

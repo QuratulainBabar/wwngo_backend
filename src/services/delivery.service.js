@@ -16,6 +16,7 @@ import {
   senderPaysReceiverFee,
   receiverPlatformFeeCents,
   minWalletCentsForReceiverAccept,
+  platformFeeDescription,
 } from '../utils/fees.js';
 import { labelsInSameArea } from '../utils/meetup_location_match.js';
 
@@ -187,6 +188,7 @@ function mapDelivery(row, photos = []) {
     receiverPhone: row.receiver_phone,
     receiverMeetupLocation: row.receiver_meetup_location || null,
     receiverId: row.receiver_id || null,
+    receiverName: row.receiver_name || null,
     receiverAcceptedAt: row.receiver_accepted_at || null,
     receiverPaidAt: row.receiver_paid_at || null,
     receiverPaymentDueAt: row.receiver_payment_due_at || null,
@@ -784,25 +786,43 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId, options = {})
   }
 
   const paysReceiver = senderPaysReceiverFee(delivery);
+  const receiverFeeCents = receiverPlatformFeeCents(
+    delivery.parcelCategory,
+    paysReceiver
+  );
   const requiredCents = minWalletCentsForReceiverAccept(
     delivery.parcelCategory,
     paysReceiver
   );
 
   const walletRepo = await import('../repositories/wallet.repository.js');
-  const wallet = await walletRepo.getWallet(user.id, 'receiver');
+  const wallet = await walletRepo.getWallet(user.id);
   if (Number(wallet.available_cents) < requiredCents) {
     throw new AppError(
-      `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
+      receiverFeeCents > 0
+        ? `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept (includes platform fee).`
+        : `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
       403,
       'INSUFFICIENT_WALLET'
     );
   }
 
+  if (receiverFeeCents > 0 && !delivery.receiverPaidAt) {
+    await escrowService.chargeWalletOrCard({
+      userId: user.id,
+      role: 'receiver',
+      amountCents: receiverFeeCents,
+      description: platformFeeDescription(delivery.publicId),
+      shipmentId: delivery.publicId,
+      paymentIntentId: options.paymentIntentId || null,
+      allowPaymentRequired: true,
+    });
+  }
+
   const updated = await deliveryRepository.acceptDeliveryAsReceiver(
     delivery.id,
     user.id,
-    { receiverFeeCents: 0 }
+    { receiverFeeCents }
   );
   if (!updated) {
     throw new AppError('Unable to accept this request', 400, 'ACCEPT_FAILED');
@@ -857,7 +877,7 @@ export async function declineDeliveryAsReceiver(user, idOrPublicId) {
 }
 
 /**
- * Receiver pays platform fee share ($0 / $2 / $4).
+ * Receiver pays platform fee share ($0 / $2 docs / $3 objects).
  * Normally collected when the receiver accepts; this endpoint remains for
  * legacy/backfill when acceptance happened without a fee charge.
  */

@@ -7,7 +7,6 @@ export const MINIMUM_WITHDRAWAL_CENTS = 1000;
 export const KYC_WELCOME_CREDIT_CENTS = 0;
 export const KYC_WELCOME_DESCRIPTION =
   'Welcome credit after identity verification';
-const KYC_WELCOME_ROLES = ['sender', 'traveler', 'receiver'];
 
 function mapLedgerEntry(row) {
   return {
@@ -40,7 +39,6 @@ function toCamelType(dbType) {
 
 function mapWallet(row) {
   return {
-    role: row.role,
     availableCents: Number(row.available_cents),
     escrowCents: Number(row.escrow_cents),
     currency: 'USD',
@@ -58,47 +56,33 @@ function mapShipmentEscrow(row) {
 }
 
 /**
- * Wallet summary for the authenticated user + role.
- * Always returns zeros when no activity exists (new user).
- *
- * Traveler / receiver wallets do not hold escrow funds (those sit on the
- * sender wallet). Their `escrowCents` is the sum of related shipment escrow
- * so all three role UIs can show the same live amount.
+ * Wallet summary for the authenticated user (single balance across all roles).
+ * [activityRole] optionally filters recent transactions by activity tag.
  */
-export async function getWalletSummary(userId, role, { recentLimit = 6 } = {}) {
-  const normalized = walletRepo.normalizeRole(role);
-  // Read-only + parallel: a wallet view shouldn't write, and the reads are
-  // independent.
+export async function getWalletSummary(userId, { recentLimit = 6, activityRole = null } = {}) {
   const [wallet, recent, relatedEscrows] = await Promise.all([
-    walletRepo.getWalletReadOnly(userId, normalized),
-    walletRepo.listLedgerEntries(userId, normalized, {
+    walletRepo.getWalletReadOnly(userId),
+    walletRepo.listLedgerEntries(userId, {
       limit: recentLimit,
       includeHidden: false,
+      activityRole,
     }),
-    walletRepo.listRelatedShipmentEscrows(userId, normalized),
+    walletRepo.listRelatedShipmentEscrows(userId),
   ]);
 
-  const relatedEscrowCents = relatedEscrows.reduce(
-    (sum, row) => sum + Number(row.amount_cents),
-    0
-  );
-  const escrowCents =
-    normalized === 'sender'
-      ? Number(wallet.escrow_cents)
-      : relatedEscrowCents;
-
   return {
-    ...mapWallet({ ...wallet, escrow_cents: escrowCents }),
+    ...mapWallet(wallet),
     shipmentEscrows: relatedEscrows.map(mapShipmentEscrow),
     recentTransactions: recent.map(mapLedgerEntry),
   };
 }
 
-export async function listTransactions(userId, role, { limit = 50 } = {}) {
-  await walletRepo.ensureWallet(userId, role);
-  const rows = await walletRepo.listLedgerEntries(userId, role, {
+export async function listTransactions(userId, { limit = 50, activityRole = null } = {}) {
+  await walletRepo.ensureWallet(userId);
+  const rows = await walletRepo.listLedgerEntries(userId, {
     limit,
     includeHidden: false,
+    activityRole,
   });
   return {
     transactions: rows.map(mapLedgerEntry),
@@ -144,17 +128,13 @@ export async function grantKycWelcomeCredit(userId) {
     throw new AppError('User not found', 404, 'USER_NOT_FOUND');
   }
 
-  const wallets = {};
-  for (const role of KYC_WELCOME_ROLES) {
-    wallets[role] = mapWallet(await walletRepo.getWalletReadOnly(userId, role));
-  }
+  const wallet = mapWallet(await walletRepo.getWalletReadOnly(userId));
 
   return {
     granted: false,
     alreadyGranted: false,
     amountCents: 0,
-    roles: KYC_WELCOME_ROLES,
-    wallets,
+    wallet,
   };
 }
 
@@ -290,9 +270,8 @@ export async function confirmTopUp(userId, paymentIntentId) {
 
   const result = await completeTopUpFromPaymentIntent(intentId);
   if (!result.credited) {
-    // Already credited via webhook — return current wallet for the role on the PI.
-    const role = intent.metadata?.role || 'sender';
-    const wallet = await walletRepo.getWallet(userId, role);
+    // Already credited via webhook — return current wallet.
+    const wallet = await walletRepo.getWallet(userId);
     return {
       credited: false,
       alreadyCredited: true,

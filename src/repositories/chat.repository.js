@@ -42,11 +42,23 @@ export async function listConversationsForUser(userId, { threadType = null } = {
               ELSE ua.name
             END AS peer_name,
             (
-              SELECT body FROM chat_messages m
+              SELECT CASE
+                       WHEN m.is_image THEN '📷 Photo'
+                       WHEN NULLIF(TRIM(m.body), '') IS NULL THEN 'No messages yet'
+                       ELSE m.body
+                     END
+              FROM chat_messages m
               WHERE m.conversation_id = c.id
               ORDER BY m.created_at DESC
               LIMIT 1
             ) AS last_message,
+            (
+              SELECT m.is_image
+              FROM chat_messages m
+              WHERE m.conversation_id = c.id
+              ORDER BY m.created_at DESC
+              LIMIT 1
+            ) AS last_message_is_image,
             (
               SELECT created_at FROM chat_messages m
               WHERE m.conversation_id = c.id

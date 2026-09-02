@@ -2,46 +2,42 @@ import { pool } from '../db/pool.js';
 
 const WALLET_ROLES = new Set(['sender', 'traveler', 'receiver']);
 
+/** Activity context for ledger rows — not a separate wallet partition. */
 export function normalizeRole(role) {
   const value = String(role || 'sender').toLowerCase();
   return WALLET_ROLES.has(value) ? value : 'sender';
 }
 
 /**
- * Ensure a wallet row exists for (userId, role). Returns the row.
- * New users get available_cents = 0 and escrow_cents = 0.
+ * Ensure a single wallet row exists for [userId]. Returns the row.
  */
-export async function ensureWallet(userId, role, client = pool) {
-  const normalized = normalizeRole(role);
+export async function ensureWallet(userId, client = pool) {
   const { rows } = await client.query(
-    `INSERT INTO wallets (user_id, role)
-     VALUES ($1, $2::wallet_role)
-     ON CONFLICT (user_id, role) DO UPDATE SET updated_at = wallets.updated_at
+    `INSERT INTO wallets (user_id)
+     VALUES ($1)
+     ON CONFLICT (user_id) DO UPDATE SET updated_at = wallets.updated_at
      RETURNING *`,
-    [userId, normalized]
+    [userId]
   );
   return rows[0];
 }
 
-export async function getWallet(userId, role) {
-  return ensureWallet(userId, role);
+export async function getWallet(userId) {
+  return ensureWallet(userId);
 }
 
 /**
  * Read-only wallet fetch — never writes. Returns a zeroed row when the wallet
- * doesn't exist yet, so hot read endpoints don't pay an INSERT..ON CONFLICT
- * (and a WAL write) on every view.
+ * doesn't exist yet.
  */
-export async function getWalletReadOnly(userId, role) {
-  const normalized = normalizeRole(role);
+export async function getWalletReadOnly(userId) {
   const { rows } = await pool.query(
-    `SELECT * FROM wallets WHERE user_id = $1 AND role = $2::wallet_role`,
-    [userId, normalized]
+    `SELECT * FROM wallets WHERE user_id = $1`,
+    [userId]
   );
   return (
     rows[0] || {
       user_id: userId,
-      role: normalized,
       available_cents: 0,
       escrow_cents: 0,
     }
@@ -61,23 +57,37 @@ export async function hasLedgerDescription(userId, description) {
   return rows.length > 0;
 }
 
-export async function listLedgerEntries(userId, role, { limit = 50, includeHidden = false } = {}) {
-  const normalized = normalizeRole(role);
+/**
+ * Unified transaction history for the user. [activityRole] optionally filters
+ * by the role tag stored on each ledger row.
+ */
+export async function listLedgerEntries(
+  userId,
+  { limit = 50, includeHidden = false, activityRole = null } = {}
+) {
   const capped = Math.min(Math.max(Number(limit) || 50, 1), 200);
-  const params = [userId, normalized, capped];
+  const params = [userId, capped];
   let hiddenClause = '';
   if (!includeHidden) {
     hiddenClause = 'AND hidden_from_history = FALSE';
   }
 
+  let roleClause = '';
+  if (activityRole) {
+    params.splice(1, 0, normalizeRole(activityRole));
+    roleClause = 'AND role = $2::wallet_role';
+  }
+
+  const limitParam = activityRole ? '$3' : '$2';
+
   const { rows } = await pool.query(
     `SELECT *
      FROM wallet_ledger
      WHERE user_id = $1
-       AND role = $2::wallet_role
+       ${roleClause}
        ${hiddenClause}
      ORDER BY created_at DESC
-     LIMIT $3`,
+     LIMIT ${limitParam}`,
     params
   );
   return rows;
@@ -105,23 +115,14 @@ export async function userIsPartyToShipment(userId, shipmentId) {
 }
 
 /**
- * Active (held / frozen) escrow rows for deliveries this user is a party to
- * in [role]. Used for wallet display — does not move funds.
+ * Active (held / frozen) escrow rows for deliveries this user participates in.
  */
-export async function listRelatedShipmentEscrows(userId, role) {
-  const normalized = normalizeRole(role);
-  const partyClause =
-    normalized === 'traveler'
-      ? 'd.traveler_id = $1'
-      : normalized === 'receiver'
-        ? 'd.receiver_id = $1'
-        : 'd.sender_id = $1';
-
+export async function listRelatedShipmentEscrows(userId) {
   const { rows } = await pool.query(
     `SELECT se.shipment_id, se.amount_cents, se.status, se.role
      FROM shipment_escrows se
      INNER JOIN deliveries d ON d.public_id = se.shipment_id
-     WHERE ${partyClause}
+     WHERE (d.sender_id = $1 OR d.traveler_id = $1 OR d.receiver_id = $1)
        AND se.status IN ('held', 'frozen')
      ORDER BY se.updated_at DESC`,
     [userId]
@@ -130,7 +131,8 @@ export async function listRelatedShipmentEscrows(userId, role) {
 }
 
 /**
- * Append a ledger row and update wallet balances atomically.
+ * Append a ledger row and update the user's single wallet atomically.
+ * [role] tags the activity context (sender / traveler / receiver).
  * Returns { wallet, entry }.
  */
 export async function appendLedgerEntry({
@@ -148,7 +150,7 @@ export async function appendLedgerEntry({
   try {
     await client.query('BEGIN');
 
-    const wallet = await ensureWallet(userId, role, client);
+    const wallet = await ensureWallet(userId, client);
     const nextAvailable = Number(wallet.available_cents) + Number(availableDeltaCents);
     const nextEscrow = Number(wallet.escrow_cents) + Number(escrowDeltaCents);
 
@@ -196,11 +198,10 @@ export async function appendLedgerEntry({
       ]
     );
 
-    // Keep users.wallet_balance in sync with total available across roles.
     await client.query(
       `UPDATE users
        SET wallet_balance = (
-         SELECT COALESCE(SUM(available_cents), 0) / 100.0
+         SELECT COALESCE(available_cents, 0) / 100.0
          FROM wallets
          WHERE user_id = $1
        ),
