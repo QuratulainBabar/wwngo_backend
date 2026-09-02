@@ -4,6 +4,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/home/limiria/public_html/wango}"
 BRANCH="${DEPLOY_BRANCH:-main}"
+REPO_URL="${REPO_URL:-https://github.com/QuratulainBabar/wwngo_backend.git}"
 
 cd "$APP_DIR"
 
@@ -15,9 +16,15 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+if [[ ! -d .git ]]; then
+  echo "==> Initializing git repo"
+  git init
+  git remote add origin "$REPO_URL"
+fi
+
+git remote set-url origin "$REPO_URL"
 git fetch origin "$BRANCH"
-git checkout "$BRANCH"
-git reset --hard "origin/$BRANCH"
+git checkout -f -B "$BRANCH" "origin/$BRANCH"
 
 echo "==> Installing dependencies"
 npm install --omit=dev

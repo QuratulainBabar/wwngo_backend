@@ -26,21 +26,23 @@ jobs:
           script: |
             set -euo pipefail
             APP_DIR="/home/limiria/public_html/wango"
+            REPO_URL="https://github.com/QuratulainBabar/wwngo_backend.git"
             cd "$APP_DIR"
-
-            if [[ ! -d .git ]]; then
-              echo "ERROR: $APP_DIR is not a git repo. Run one-time server setup first."
-              exit 1
-            fi
 
             if [[ ! -f .env ]]; then
               echo "ERROR: .env missing on server."
               exit 1
             fi
 
+            if [[ ! -d .git ]]; then
+              echo "Initializing git repo in $APP_DIR"
+              git init
+              git remote add origin "$REPO_URL"
+            fi
+
+            git remote set-url origin "$REPO_URL"
             git fetch origin main
-            git checkout main
-            git reset --hard origin/main
+            git checkout -f -B main origin/main
 
             npm install --omit=dev
             npm run db:migrate
