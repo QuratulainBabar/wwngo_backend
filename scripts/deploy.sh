@@ -33,23 +33,41 @@ echo "==> Running migrations"
 npm run db:migrate
 
 echo "==> Restarting app"
-if command -v pm2 >/dev/null 2>&1 && pm2 describe wwngo >/dev/null 2>&1; then
-  pm2 restart wwngo --update-env
-  pm2 save
-elif command -v pm2 >/dev/null 2>&1; then
-  pm2 start src/index.js --name wwngo --update-env
-  pm2 save
-elif [[ -f tmp/restart.txt ]]; then
-  # Phusion Passenger
-  mkdir -p tmp
-  touch tmp/restart.txt
+mkdir -p tmp
+touch tmp/restart.txt || true
+
+if command -v pm2 >/dev/null 2>&1; then
+  if pm2 describe wwngo >/dev/null 2>&1; then
+    pm2 restart wwngo --update-env
+  else
+    pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
+    sleep 1
+    pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
+  fi
+  pm2 save || true
 else
-  # Fallback: kill previous node for this app, then start again
   pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
+  sleep 1
   nohup npm start >>"$APP_DIR/app.log" 2>&1 &
   echo "Started with nohup (logs: $APP_DIR/app.log)"
 fi
 
+echo "==> Health check"
+ok=0
+for i in 1 2 3 4 5 6; do
+  sleep 2
+  if curl -fsS "https://wango.toolkitpro.cloud/health"; then
+    echo
+    ok=1
+    break
+  fi
+  echo "Attempt $i failed, retrying..."
+done
+if [[ "$ok" -ne 1 ]]; then
+  echo "Health check failed"
+  pm2 status || true
+  tail -n 50 "$APP_DIR/app.log" 2>/dev/null || true
+  exit 1
+fi
+
 echo "==> Deploy complete"
-curl -fsS "https://wango.toolkitpro.cloud/health" || true
-echo
