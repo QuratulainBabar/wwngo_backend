@@ -88,36 +88,101 @@ function requireString(value, field) {
   return s;
 }
 
-function meetupBelongsToOrigin(meetupLabel, originCity, originCountryCode) {
+function meetupBelongsToOrigin(meetupLabel, originCity, originCountryCode, options = {}) {
   return labelsInSameArea(meetupLabel, originCity, {
     routeCountryCode: originCountryCode,
+    sameCountrySufficient: Boolean(options.sameCountrySufficient),
   });
 }
 
-function assertMeetupsWithinOrigin(meetupLocations, originCity, originCountryCode) {
+function assertMeetupsWithinOrigin(
+  meetupLocations,
+  originCity,
+  originCountryCode,
+  options = {}
+) {
   const city = String(originCity ?? '').trim();
   if (!city) return;
   for (const loc of meetupLocations) {
-    if (!meetupBelongsToOrigin(loc, city, originCountryCode)) {
+    if (!meetupBelongsToOrigin(loc, city, originCountryCode, options)) {
       throw new AppError(MEETUP_ORIGIN_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
     }
   }
 }
 
-function meetupBelongsToDestination(meetupLabel, destinationCity, destinationCountryCode) {
+function meetupBelongsToDestination(
+  meetupLabel,
+  destinationCity,
+  destinationCountryCode,
+  options = {}
+) {
   return labelsInSameArea(meetupLabel, destinationCity, {
     routeCountryCode: destinationCountryCode,
+    sameCountrySufficient: Boolean(options.sameCountrySufficient),
   });
 }
 
 function assertMeetupWithinDestination(
   meetupLabel,
   destinationCity,
-  destinationCountryCode
+  destinationCountryCode,
+  options = {}
 ) {
   const city = String(destinationCity ?? '').trim();
   if (!city) return;
-  if (!meetupBelongsToDestination(meetupLabel, city, destinationCountryCode)) {
+  if (!meetupBelongsToDestination(meetupLabel, city, destinationCountryCode, options)) {
+    throw new AppError(MEETUP_DESTINATION_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
+  }
+}
+
+function assertCountryToCountryMeetups({
+  meetupLocations,
+  receiverMeetupLocation,
+  originCity,
+  originAirport,
+  originCountry,
+  originCountryCode,
+  destinationCity,
+  destinationAirport,
+  destinationCountry,
+  destinationCountryCode,
+}) {
+  const originOk = (label) =>
+    meetupBelongsToOrigin(label, originAirport, originCountryCode, {
+      sameCountrySufficient: true,
+    }) ||
+    meetupBelongsToOrigin(label, originCity, originCountryCode, {
+      sameCountrySufficient: true,
+    }) ||
+    meetupBelongsToOrigin(label, originCountry, originCountryCode, {
+      sameCountrySufficient: true,
+    });
+  for (const loc of meetupLocations) {
+    if (!originOk(loc)) {
+      throw new AppError(MEETUP_ORIGIN_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
+    }
+  }
+
+  const destOk =
+    meetupBelongsToDestination(
+      receiverMeetupLocation,
+      destinationAirport,
+      destinationCountryCode,
+      { sameCountrySufficient: true }
+    ) ||
+    meetupBelongsToDestination(
+      receiverMeetupLocation,
+      destinationCity,
+      destinationCountryCode,
+      { sameCountrySufficient: true }
+    ) ||
+    meetupBelongsToDestination(
+      receiverMeetupLocation,
+      destinationCountry,
+      destinationCountryCode,
+      { sameCountrySufficient: true }
+    );
+  if (!destOk) {
     throw new AppError(MEETUP_DESTINATION_VALIDATION_MESSAGE, 400, 'VALIDATION_ERROR');
   }
 }
@@ -345,16 +410,18 @@ function validateDeliveryFormBody(body, deliveryType) {
   const destinationCity = String(body.destinationCity ?? '').trim();
   const fromCode = String(body.fromCode ?? '').trim().toUpperCase();
   const toCode = String(body.toCode ?? '').trim().toUpperCase();
-  assertMeetupsWithinOrigin(
-    preferredMeetupLocations,
-    originCity || originAirport || originCountry,
-    fromCode
-  );
-  assertMeetupWithinDestination(
+  assertCountryToCountryMeetups({
+    meetupLocations: preferredMeetupLocations,
     receiverMeetupLocation,
-    destinationCity || destinationAirport || destinationCountry,
-    toCode
-  );
+    originCity,
+    originAirport,
+    originCountry,
+    originCountryCode: fromCode,
+    destinationCity,
+    destinationAirport,
+    destinationCountry,
+    destinationCountryCode: toCode,
+  });
 
   return {
     ...base,
@@ -362,6 +429,8 @@ function validateDeliveryFormBody(body, deliveryType) {
     originAirport,
     destinationCountry,
     destinationAirport,
+    fromCode: fromCode || null,
+    toCode: toCode || null,
   };
 }
 
@@ -797,11 +866,12 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId, options = {})
 
   const walletRepo = await import('../repositories/wallet.repository.js');
   const wallet = await walletRepo.getWallet(user.id);
-  if (Number(wallet.available_cents) < requiredCents) {
+  // When a receiver fee is due, chargeWalletOrCard opens Stripe Payment Sheet
+  // on shortfall (same as sender escrow / traveler handoff). Only require a
+  // pre-funded wallet when there is no fee to collect by card.
+  if (receiverFeeCents <= 0 && Number(wallet.available_cents) < requiredCents) {
     throw new AppError(
-      receiverFeeCents > 0
-        ? `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept (includes platform fee).`
-        : `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
+      `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
       403,
       'INSUFFICIENT_WALLET'
     );
@@ -881,7 +951,11 @@ export async function declineDeliveryAsReceiver(user, idOrPublicId) {
  * Normally collected when the receiver accepts; this endpoint remains for
  * legacy/backfill when acceptance happened without a fee charge.
  */
-export async function submitReceiverPayment(user, idOrPublicId, { feeCents } = {}) {
+export async function submitReceiverPayment(
+  user,
+  idOrPublicId,
+  { feeCents, paymentIntentId = null } = {}
+) {
   const delivery = await getDeliveryForReceiver(user, idOrPublicId);
   if (delivery.receiverPaidAt) {
     return delivery;
@@ -922,7 +996,8 @@ export async function submitReceiverPayment(user, idOrPublicId, { feeCents } = {
     amountCents: cents,
     description: `Receiver platform fee for ${delivery.publicId}`,
     shipmentId: delivery.publicId,
-    allowPaymentRequired: false,
+    paymentIntentId: paymentIntentId || null,
+    allowPaymentRequired: true,
   });
 
   const { rows } = await pool.query(

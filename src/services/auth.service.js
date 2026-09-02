@@ -139,10 +139,15 @@ function assertNotLocked(userRow) {
 }
 
 async function findUserByEmail(email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
   const { rows } = await pool.query(
     `SELECT ${USER_COLUMNS}, password_hash, failed_login_attempts, locked_until
-     FROM users WHERE LOWER(email) = LOWER($1)`,
-    [email]
+     FROM users
+     WHERE LOWER(BTRIM(email)) = $1
+     ORDER BY terms_accepted_at DESC NULLS LAST, created_at ASC
+     LIMIT 1`,
+    [normalized]
   );
   return rows[0] || null;
 }
@@ -228,8 +233,9 @@ export async function registerUser({
 }
 
 export async function loginUser({ email, password }) {
-  const userRow = await findUserByEmail(normalizeEmail(email));
+  const userRow = await findUserByEmail(email);
   if (!userRow) {
+    console.warn('[AUTH] login rejected: no account for that email');
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -238,6 +244,7 @@ export async function loginUser({ email, password }) {
 
   const valid = await verifyPassword(password, userRow.password_hash);
   if (!valid) {
+    console.warn('[AUTH] login rejected: password mismatch');
     await recordFailedLogin(userRow.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
@@ -258,8 +265,9 @@ export async function loginUser({ email, password }) {
 export async function sendPasswordLoginOtp({ email, password }) {
   console.log(`[AUTH] password-otp/send requested for ${normalizeEmail(email)}`);
 
-  const userRow = await findUserByEmail(normalizeEmail(email));
+  const userRow = await findUserByEmail(email);
   if (!userRow) {
+    console.warn('[AUTH] password-otp/send rejected: no account for that email');
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
@@ -268,6 +276,7 @@ export async function sendPasswordLoginOtp({ email, password }) {
 
   const valid = await verifyPassword(password, userRow.password_hash);
   if (!valid) {
+    console.warn('[AUTH] password-otp/send rejected: password mismatch');
     await recordFailedLogin(userRow.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
@@ -322,7 +331,7 @@ export async function completePasswordLoginOtp({ email, password, code }) {
     throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
   }
 
-  const userRow = await findUserByEmail(normalizeEmail(email));
+  const userRow = await findUserByEmail(email);
   if (!userRow) {
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }

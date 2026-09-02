@@ -195,12 +195,16 @@ export async function createTopUpPaymentIntent(userId, role, amountCents) {
     );
   }
 
-  await pool.query(
-    `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
-    [userId, role, amountCents, intent.id]
-  );
+  try {
+    await pool.query(
+      `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+      [userId, walletRepo.normalizeRole(role), amountCents, intent.id]
+    );
+  } catch (err) {
+    console.error('[wallet] pending_topups insert failed:', err.message);
+  }
 
   return {
     paymentIntentId: intent.id,
@@ -212,32 +216,156 @@ export async function createTopUpPaymentIntent(userId, role, amountCents) {
   };
 }
 
-export async function completeTopUpFromPaymentIntent(paymentIntentId) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function ledgerDescriptionForIntent(paymentIntentId) {
+  return `Top-up via Stripe (${paymentIntentId})`;
+}
+
+async function retrieveUntilSucceeded(stripeService, paymentIntentId) {
+  let intent = await stripeService.retrievePaymentIntent(paymentIntentId);
+  const waitStatuses = new Set(['processing', 'requires_action', 'requires_confirmation']);
+  for (let i = 0; i < 8 && waitStatuses.has(intent?.status); i += 1) {
+    await sleep(250);
+    intent = await stripeService.retrievePaymentIntent(paymentIntentId);
+  }
+  return intent;
+}
+
+/**
+ * Credit available balance for a succeeded Stripe PaymentIntent.
+ * Idempotent: pending_topups.status + ledger description keyed by intent id.
+ * Uses the PaymentIntent as source of truth so a missing pending row (webhook
+ * race, failed insert, older backend) still credits after card success.
+ */
+export async function completeTopUpFromPaymentIntent(paymentIntentId, fallback = {}) {
+  const intentId = String(paymentIntentId || '').trim();
+  if (!intentId) return { credited: false };
+
   const { pool } = await import('../db/pool.js');
-  const { rows } = await pool.query(
-    `SELECT * FROM pending_topups
-     WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-     FOR UPDATE`,
-    [paymentIntentId]
-  );
-  const pending = rows[0];
-  if (!pending) return { credited: false };
+  const userId = fallback.userId || null;
+  const role = walletRepo.normalizeRole(fallback.role);
+  const amountCents = Number(fallback.amountCents);
 
-  const { wallet, entry } = await walletRepo.appendLedgerEntry({
-    userId: pending.user_id,
-    role: pending.role,
-    type: 'top_up',
-    amountCents: Number(pending.amount_cents),
-    availableDeltaCents: Number(pending.amount_cents),
-    description: 'Top-up via Stripe',
-  });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  await pool.query(
-    `UPDATE pending_topups SET status = 'completed', completed_at = NOW() WHERE id = $1`,
-    [pending.id]
-  );
+    let pendingTableMissing = false;
+    if (userId && Number.isInteger(amountCents) && amountCents > 0) {
+      try {
+        await client.query(
+          `INSERT INTO pending_topups (user_id, role, amount_cents, stripe_payment_intent_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+          [userId, role, amountCents, intentId]
+        );
+      } catch (err) {
+        if (err.code === '42P01') {
+          pendingTableMissing = true;
+        } else if (err.code !== '23502') {
+          throw err;
+        }
+      }
+    }
 
-  return { credited: true, wallet: mapWallet(wallet), entry: mapLedgerEntry(entry) };
+    let pending = null;
+    if (!pendingTableMissing) {
+      try {
+        const { rows } = await client.query(
+          `SELECT * FROM pending_topups
+           WHERE stripe_payment_intent_id = $1
+           FOR UPDATE`,
+          [intentId]
+        );
+        pending = rows[0] || null;
+      } catch (err) {
+        if (err.code === '42P01') {
+          pendingTableMissing = true;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (pending?.status === 'completed') {
+      await client.query('COMMIT');
+      const wallet = await walletRepo.getWallet(pending.user_id);
+      return {
+        credited: false,
+        alreadyCredited: true,
+        wallet: mapWallet(wallet),
+      };
+    }
+
+    const creditUserId = pending?.user_id || userId;
+    const creditRole = pending?.role || role;
+    const creditAmount = Number(pending?.amount_cents) || amountCents;
+    if (!creditUserId || !Number.isInteger(creditAmount) || creditAmount <= 0) {
+      await client.query('ROLLBACK');
+      return { credited: false };
+    }
+
+    const description = ledgerDescriptionForIntent(intentId);
+    const { rows: existing } = await client.query(
+      `SELECT 1
+       FROM wallet_ledger
+       WHERE user_id = $1
+         AND type = 'top_up'
+         AND description = $2
+       LIMIT 1`,
+      [creditUserId, description]
+    );
+    if (existing.length > 0) {
+      if (pending && !pendingTableMissing) {
+        await client.query(
+          `UPDATE pending_topups SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+          [pending.id]
+        );
+      }
+      await client.query('COMMIT');
+      const wallet = await walletRepo.getWallet(creditUserId);
+      return {
+        credited: false,
+        alreadyCredited: true,
+        wallet: mapWallet(wallet),
+      };
+    }
+
+    const { wallet, entry } = await walletRepo.appendLedgerEntry({
+      userId: creditUserId,
+      role: creditRole,
+      type: 'top_up',
+      amountCents: creditAmount,
+      availableDeltaCents: creditAmount,
+      description,
+      client,
+    });
+
+    if (pending && !pendingTableMissing) {
+      await client.query(
+        `UPDATE pending_topups SET status = 'completed', completed_at = NOW() WHERE id = $1`,
+        [pending.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    console.log(
+      `[wallet] credited top-up ${creditAmount} cents for user ${creditUserId} (${intentId})`
+    );
+    return { credited: true, wallet: mapWallet(wallet), entry: mapLedgerEntry(entry) };
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -250,13 +378,13 @@ export async function confirmTopUp(userId, paymentIntentId) {
   }
 
   const stripeService = await import('./stripe.service.js');
-  const intent = await stripeService.retrievePaymentIntent(intentId);
+  const intent = await retrieveUntilSucceeded(stripeService, intentId);
   if (!intent) {
     throw new AppError('Payment intent not found', 404, 'NOT_FOUND');
   }
 
   const metaUser = intent.metadata?.userId;
-  if (metaUser && metaUser !== userId) {
+  if (metaUser && String(metaUser) !== String(userId)) {
     throw new AppError('Payment does not belong to this user', 403, 'FORBIDDEN');
   }
 
@@ -268,15 +396,29 @@ export async function confirmTopUp(userId, paymentIntentId) {
     );
   }
 
-  const result = await completeTopUpFromPaymentIntent(intentId);
+  const amountCents = Number(intent.amount) || Number(intent.metadata?.amountCents) || 0;
+  const role = intent.metadata?.role || 'sender';
+
+  const result = await completeTopUpFromPaymentIntent(intentId, {
+    userId,
+    role,
+    amountCents,
+  });
+
   if (!result.credited) {
-    // Already credited via webhook — return current wallet.
-    const wallet = await walletRepo.getWallet(userId);
-    return {
-      credited: false,
-      alreadyCredited: true,
-      ...mapWallet(wallet),
-    };
+    if (result.alreadyCredited || result.wallet) {
+      const wallet = result.wallet || mapWallet(await walletRepo.getWallet(userId));
+      return {
+        credited: false,
+        alreadyCredited: true,
+        ...wallet,
+      };
+    }
+    throw new AppError(
+      'Payment succeeded but the wallet could not be credited. Please try again.',
+      500,
+      'TOPUP_CREDIT_FAILED'
+    );
   }
 
   return {
@@ -462,7 +604,7 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet' } 
   const base = /^https:\/\//i.test(configured) ||
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configured)
     ? configured
-    : 'http://172.31.234.196:3000';
+    : 'http://192.168.100.16:3000';
   const returnUrl = `${base}${path}`;
   let link;
   try {

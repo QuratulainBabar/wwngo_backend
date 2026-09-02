@@ -145,10 +145,12 @@ export async function appendLedgerEntry({
   description,
   shipmentId = null,
   hiddenFromHistory = false,
+  client: existingClient = null,
 }) {
-  const client = await pool.connect();
+  const owned = !existingClient;
+  const client = existingClient || await pool.connect();
   try {
-    await client.query('BEGIN');
+    if (owned) await client.query('BEGIN');
 
     const wallet = await ensureWallet(userId, client);
     const nextAvailable = Number(wallet.available_cents) + Number(availableDeltaCents);
@@ -210,12 +212,12 @@ export async function appendLedgerEntry({
       [userId]
     );
 
-    await client.query('COMMIT');
+    if (owned) await client.query('COMMIT');
     return { wallet: walletRows[0], entry: entryRows[0] };
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (owned) await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if (owned) client.release();
   }
 }

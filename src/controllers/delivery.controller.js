@@ -124,7 +124,10 @@ export const submitReceiverPayment = asyncHandler(async (req, res) => {
   const data = await deliveryService.submitReceiverPayment(
     req.user,
     req.params.id,
-    { feeCents: req.body?.feeCents }
+    {
+      feeCents: req.body?.feeCents,
+      paymentIntentId: req.body?.paymentIntentId || null,
+    }
   );
   res.json({ success: true, data });
 });

@@ -1,4 +1,5 @@
 import { AppError } from '../utils/errors.js';
+import { pool } from '../db/pool.js';
 import * as deliveryRepository from '../repositories/delivery.repository.js';
 import * as tripRepository from '../repositories/trip.repository.js';
 import * as requestRepository from '../repositories/trip_sender_request.repository.js';
@@ -145,15 +146,6 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
     throw new AppError('This delivery can no longer request travelers', 400, 'INVALID_STATUS');
   }
 
-  const activeCount = await requestRepository.countActiveRequestsForDelivery(delivery.id);
-  if (activeCount >= MAX_TRAVELER_REQUESTS_PER_DELIVERY) {
-    throw new AppError(
-      `You can request at most ${MAX_TRAVELER_REQUESTS_PER_DELIVERY} travelers for this delivery`,
-      400,
-      'REQUEST_LIMIT'
-    );
-  }
-
   const trip = await loadTripByIdOrPublicId(tripIdOrPublic);
   if (!trip || trip.status !== 'open_bid') {
     throw new AppError('Trip not found or no longer available', 404, 'TRIP_NOT_FOUND');
@@ -166,14 +158,84 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
   const timerService = await import('./timer.service.js');
   const acceptDueAt = timerService.travelerAcceptDeadline(trip.travel_date || delivery.travel_date);
 
-  const row = await requestRepository.createSenderRequest({
-    deliveryId: delivery.id,
-    tripId: trip.id,
-    senderId,
-    travelerId: trip.traveler_id,
-    matchScore,
-    acceptDueAt,
-  });
+  const client = await pool.connect();
+  let row;
+  try {
+    await client.query('BEGIN');
+    const locked = await requestRepository.lockDeliveryForUpdate(delivery.id, client);
+    if (!locked) {
+      throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+    }
+
+    const existing = await requestRepository.findRequestByDeliveryAndTrip(
+      delivery.id,
+      trip.id,
+      client
+    );
+    const existingStatus = String(existing?.status || '').toLowerCase();
+    if (existingStatus === 'pending' || existingStatus === 'accepted') {
+      throw new AppError(
+        'You have already requested this traveler for this parcel.',
+        400,
+        'ALREADY_REQUESTED'
+      );
+    }
+
+    const activeCount = await requestRepository.countActiveRequestsForDelivery(
+      delivery.id,
+      client
+    );
+    if (activeCount >= MAX_TRAVELER_REQUESTS_PER_DELIVERY) {
+      throw new AppError(
+        `You can request at most ${MAX_TRAVELER_REQUESTS_PER_DELIVERY} travelers for this parcel.`,
+        400,
+        'REQUEST_LIMIT'
+      );
+    }
+
+    row = await requestRepository.createSenderRequest(
+      {
+        deliveryId: delivery.id,
+        tripId: trip.id,
+        senderId,
+        travelerId: trip.traveler_id,
+        matchScore,
+        acceptDueAt,
+      },
+      client
+    );
+
+    const afterCount = await requestRepository.countActiveRequestsForDelivery(
+      delivery.id,
+      client
+    );
+    if (afterCount > MAX_TRAVELER_REQUESTS_PER_DELIVERY) {
+      throw new AppError(
+        `You can request at most ${MAX_TRAVELER_REQUESTS_PER_DELIVERY} travelers for this parcel.`,
+        400,
+        'REQUEST_LIMIT'
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // Ignore rollback errors so the original failure is reported.
+    }
+    if (err instanceof AppError) throw err;
+    if (err?.code === '23505') {
+      throw new AppError(
+        'You have already requested this traveler for this parcel.',
+        400,
+        'ALREADY_REQUESTED'
+      );
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 
   const mappedTrip = mapTrip(trip);
   const deliveryPublicId = delivery.public_id;

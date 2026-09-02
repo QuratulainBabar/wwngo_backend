@@ -109,7 +109,11 @@ export async function handleWebhook(rawBody, signature) {
     const purpose = intent.metadata?.purpose;
     if (purpose === 'wallet_top_up' || purpose === 'escrow_shortfall') {
       const walletService = await import('./wallet.service.js');
-      await walletService.completeTopUpFromPaymentIntent(intent.id);
+      await walletService.completeTopUpFromPaymentIntent(intent.id, {
+        userId: intent.metadata?.userId,
+        role: intent.metadata?.role,
+        amountCents: Number(intent.amount) || Number(intent.metadata?.amountCents),
+      });
     }
   }
 

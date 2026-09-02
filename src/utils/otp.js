@@ -42,5 +42,5 @@ export async function createOtpRecord(code) {
 }
 
 export function normalizeEmail(email) {
-  return email.trim().toLowerCase();
+  return String(email ?? '').trim().toLowerCase();
 }

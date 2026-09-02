@@ -57,7 +57,7 @@ function isSignificantToken(token) {
 export function labelsInSameArea(
   meetupLabel,
   routeLabel,
-  { routeCountryCode, meetupCountryCode } = {}
+  { routeCountryCode, meetupCountryCode, sameCountrySufficient = false } = {}
 ) {
   const label = String(meetupLabel ?? '').trim().toLowerCase();
   const route = String(routeLabel ?? '').trim().toLowerCase();
@@ -71,6 +71,14 @@ export function labelsInSameArea(
     routeCc !== meetupCc
   ) {
     return false;
+  }
+  if (
+    sameCountrySufficient &&
+    routeCc.length === 2 &&
+    meetupCc.length === 2 &&
+    routeCc === meetupCc
+  ) {
+    return true;
   }
 
   if (label.includes(route) || route.includes(label)) return true;
@@ -90,6 +98,13 @@ export function labelsInSameArea(
     meetupCc.length === 2 &&
     routeCc === meetupCc
   ) {
+    const countryName = COUNTRY_NAMES[routeCc];
+    if (countryName && countryName.length >= 3 && label.includes(countryName)) {
+      return true;
+    }
+  }
+
+  if (sameCountrySufficient && routeCc.length === 2) {
     const countryName = COUNTRY_NAMES[routeCc];
     if (countryName && countryName.length >= 3 && label.includes(countryName)) {
       return true;

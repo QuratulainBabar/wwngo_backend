@@ -1,5 +1,27 @@
 import { pool } from '../db/pool.js';
 
+function db(client) {
+  return client || pool;
+}
+
+export async function lockDeliveryForUpdate(deliveryId, client) {
+  const { rows } = await client.query(
+    `SELECT id FROM deliveries WHERE id = $1 FOR UPDATE`,
+    [deliveryId]
+  );
+  return rows[0] || null;
+}
+
+export async function findRequestByDeliveryAndTrip(deliveryId, tripId, client) {
+  const { rows } = await db(client).query(
+    `SELECT * FROM trip_sender_requests
+     WHERE delivery_id = $1 AND trip_id = $2
+     LIMIT 1`,
+    [deliveryId, tripId]
+  );
+  return rows[0] || null;
+}
+
 export async function createSenderRequest({
   deliveryId,
   tripId,
@@ -7,22 +29,22 @@ export async function createSenderRequest({
   travelerId,
   matchScore = 0,
   acceptDueAt = null,
-}) {
-  const { rows } = await pool.query(
+}, client) {
+  const { rows } = await db(client).query(
     `INSERT INTO trip_sender_requests (
        delivery_id, trip_id, sender_id, traveler_id, match_score, status, read_at, accept_due_at
      ) VALUES ($1, $2, $3, $4, $5, 'pending', NULL, $6)
      ON CONFLICT (delivery_id, trip_id)
      DO UPDATE SET
        match_score = EXCLUDED.match_score,
-       accept_due_at = COALESCE(EXCLUDED.accept_due_at, trip_sender_requests.accept_due_at),
+       accept_due_at = EXCLUDED.accept_due_at,
        status = CASE
-         WHEN trip_sender_requests.status = 'cancelled'
+         WHEN trip_sender_requests.status IN ('cancelled', 'declined')
            THEN 'pending'
          ELSE trip_sender_requests.status
        END,
        read_at = CASE
-         WHEN trip_sender_requests.status = 'cancelled'
+         WHEN trip_sender_requests.status IN ('cancelled', 'declined')
            THEN NULL
          ELSE trip_sender_requests.read_at
        END,
@@ -108,8 +130,8 @@ export async function countPendingRequestsForTraveler(travelerId) {
 }
 
 /** Pending sender requests for a delivery (max 2 travelers per delivery). */
-export async function countActiveRequestsForDelivery(deliveryId) {
-  const { rows } = await pool.query(
+export async function countActiveRequestsForDelivery(deliveryId, client) {
+  const { rows } = await db(client).query(
     `SELECT COUNT(*)::int AS count
      FROM trip_sender_requests
      WHERE delivery_id = $1

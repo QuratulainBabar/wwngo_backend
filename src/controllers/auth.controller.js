@@ -50,17 +50,17 @@ export const registerValidators = [
 ];
 
 export const loginValidators = [
-  body('email').isEmail().withMessage('Enter a valid email address'),
+  body('email').trim().isEmail().withMessage('Enter a valid email address'),
   body('password').notEmpty().withMessage('Password is required'),
 ];
 
 export const passwordLoginOtpSendValidators = [
-  body('email').isEmail().withMessage('Enter a valid email address'),
+  body('email').trim().isEmail().withMessage('Enter a valid email address'),
   body('password').notEmpty().withMessage('Password is required'),
 ];
 
 export const passwordLoginOtpVerifyValidators = [
-  body('email').isEmail().withMessage('Enter a valid email address'),
+  body('email').trim().isEmail().withMessage('Enter a valid email address'),
   body('password').notEmpty().withMessage('Password is required'),
   body('code')
     .isLength({ min: 6, max: 6 })

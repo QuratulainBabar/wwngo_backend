@@ -14,12 +14,31 @@ try {
 
 const ROUNDS = 12;
 
+/** Strip autofill newlines; never treat a non-string as a password. */
+export function normalizePasswordInput(password) {
+  if (typeof password !== 'string') return '';
+  return password.replace(/\r?\n/g, '');
+}
+
+function hashToString(hash) {
+  if (typeof hash === 'string') return hash.trim();
+  if (Buffer.isBuffer(hash)) return hash.toString('utf8').trim();
+  return '';
+}
+
 export async function hashPassword(password) {
-  return bcrypt.hash(password, ROUNDS);
+  return bcrypt.hash(normalizePasswordInput(password), ROUNDS);
 }
 
 export async function verifyPassword(password, hash) {
-  return bcrypt.compare(password, hash);
+  const normalized = normalizePasswordInput(password);
+  const hashStr = hashToString(hash);
+  if (!normalized || !hashStr) return false;
+  try {
+    return await bcrypt.compare(normalized, hashStr);
+  } catch {
+    return false;
+  }
 }
 
 export async function hashToken(token) {
