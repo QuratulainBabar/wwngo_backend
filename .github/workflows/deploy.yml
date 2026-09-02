@@ -1,0 +1,64 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="/home/limiria/public_html/wango"
+            cd "$APP_DIR"
+
+            if [[ ! -d .git ]]; then
+              echo "ERROR: $APP_DIR is not a git repo. Run one-time server setup first."
+              exit 1
+            fi
+
+            if [[ ! -f .env ]]; then
+              echo "ERROR: .env missing on server."
+              exit 1
+            fi
+
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+
+            npm install --omit=dev
+            npm run db:migrate
+
+            if command -v pm2 >/dev/null 2>&1 && pm2 describe wwngo >/dev/null 2>&1; then
+              pm2 restart wwngo --update-env
+              pm2 save
+            elif command -v pm2 >/dev/null 2>&1; then
+              pm2 start src/index.js --name wwngo --update-env
+              pm2 save
+            elif [[ -d tmp ]]; then
+              touch tmp/restart.txt
+            else
+              pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
+              nohup npm start >>"$APP_DIR/app.log" 2>&1 &
+            fi
+
+            sleep 2
+            curl -fsS "https://wango.toolkitpro.cloud/health"
+            echo
+            echo "Deploy OK"
