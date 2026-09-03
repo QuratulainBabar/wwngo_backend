@@ -73,6 +73,7 @@ router.get('/connect/status', walletController.getConnectStatus);
 router.post(
   '/connect/onboard',
   body('returnPath').optional().isString(),
+  body('role').optional().isIn(['sender', 'traveler', 'receiver']),
   validate,
   walletController.startConnectOnboarding
 );

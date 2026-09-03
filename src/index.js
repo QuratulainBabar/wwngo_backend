@@ -27,6 +27,7 @@ import { UPLOADS_ROOT } from './services/delivery.service.js';
 import { initSocketServer } from './services/socket_hub.js';
 import { startTimerWorker } from './services/timer.service.js';
 import * as stripeService from './services/stripe.service.js';
+import { connectReturnPage } from './routes/connect_return.js';
 
 trustSystemCertificates();
 
@@ -49,6 +50,13 @@ app.use((req, res, next) => {
 
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
+  // LAN HTTP is used in development; do not force browsers onto HTTPS.
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      upgradeInsecureRequests: null,
+    },
+  },
 }));
 
 // gzip responses. Loaded gracefully so a not-yet-installed dependency degrades
@@ -98,6 +106,14 @@ app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/nfc', nfcRoutes);
 app.use('/api/v1/meetup', meetupRoutes);
 app.use('/api/v1/tracking', trackingRoutes);
+
+app.get('/connect/return', connectReturnPage);
+app.get('/wallet', (req, res, next) => {
+  if (req.query.connect != null || req.query.status != null) {
+    return connectReturnPage(req, res);
+  }
+  next();
+});
 
 app.use(notFoundHandler);
 app.use(errorHandler);

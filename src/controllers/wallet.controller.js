@@ -89,6 +89,7 @@ export const getConnectStatus = asyncHandler(async (req, res) => {
 export const startConnectOnboarding = asyncHandler(async (req, res) => {
   const data = await walletService.startConnectOnboarding(req.user.id, {
     returnPath: req.body.returnPath,
+    role: req.body.role,
   });
   res.json({ success: true, data });
 });

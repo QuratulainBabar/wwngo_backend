@@ -139,7 +139,8 @@ export async function grantKycWelcomeCredit(userId) {
 }
 
 /**
- * Credit available balance (mock Stripe top-up until payments are wired).
+ * Start a Stripe PaymentIntent for wallet top-up. The client completes
+ * Payment Sheet, then POST /wallet/top-up/confirm credits the ledger.
  */
 export async function topUp(userId, role, amountCents) {
   const cents = Number(amountCents);
@@ -148,24 +149,15 @@ export async function topUp(userId, role, amountCents) {
   }
 
   const stripeService = await import('./stripe.service.js');
-  if (stripeService.isConfigured()) {
-    return createTopUpPaymentIntent(userId, role, cents);
+  if (!stripeService.isConfigured()) {
+    throw new AppError(
+      'Stripe Payment Sheet is unavailable. Set STRIPE_SECRET_KEY on the server and restart.',
+      503,
+      'STRIPE_NOT_CONFIGURED'
+    );
   }
 
-  const { wallet, entry } = await walletRepo.appendLedgerEntry({
-    userId,
-    role,
-    type: 'top_up',
-    amountCents: cents,
-    availableDeltaCents: cents,
-    description: 'Top-up via Stripe',
-  });
-
-  return {
-    ...mapWallet(wallet),
-    entry: mapLedgerEntry(entry),
-    mock: true,
-  };
+  return createTopUpPaymentIntent(userId, role, cents);
 }
 
 /**
@@ -206,13 +198,21 @@ export async function createTopUpPaymentIntent(userId, role, amountCents) {
     console.error('[wallet] pending_topups insert failed:', err.message);
   }
 
+  if (intent.mock || !intent.client_secret) {
+    throw new AppError(
+      'Stripe Payment Sheet is unavailable. Set STRIPE_SECRET_KEY on the server and restart.',
+      503,
+      'STRIPE_NOT_CONFIGURED'
+    );
+  }
+
   return {
     paymentIntentId: intent.id,
     clientSecret: intent.client_secret,
     amountCents,
     role,
     requiresPayment: true,
-    mock: Boolean(intent.mock),
+    mock: false,
   };
 }
 
@@ -441,9 +441,10 @@ export function getPaymentsConfig() {
 export async function getPaymentsConfigAsync() {
   const stripeService = await import('./stripe.service.js');
   const enabled = stripeService.isConfigured();
+  const key = stripeService.publishableKey();
   return {
     stripeEnabled: enabled,
-    publishableKey: enabled ? stripeService.publishableKey() : null,
+    publishableKey: key || null,
     currency: 'USD',
     minimumWithdrawalCents: MINIMUM_WITHDRAWAL_CENTS,
   };
@@ -574,7 +575,7 @@ export async function getConnectStatus(userId) {
   };
 }
 
-export async function startConnectOnboarding(userId, { returnPath = '/wallet' } = {}) {
+export async function startConnectOnboarding(userId, { returnPath = '/wallet', role } = {}) {
   const { pool } = await import('../db/pool.js');
   const stripeService = await import('./stripe.service.js');
   const { env } = await import('../config/env.js');
@@ -598,19 +599,19 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet' } 
     );
   }
 
-  const path = returnPath?.startsWith('/') ? returnPath : `/${returnPath || 'wallet'}`;
   const configured = String(env.appPublicUrl || '').replace(/\/$/, '');
-  // Account Links require HTTPS except localhost; LAN HTTP IPs are rejected by Stripe.
-  const base = /^https:\/\//i.test(configured) ||
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configured)
-    ? configured
-    : 'http://192.168.100.16:3000';
-  const returnUrl = `${base}${path}`;
+  // Stripe Account Links need a reachable return URL. LAN HTTP is accepted in
+  // test mode; the path must exist on this API (not a Flutter-only route).
+  const base = configured || 'http://172.16.11.26:3000';
+  const returnUrl = `${base}/connect/return`;
+  const roleQ = ['sender', 'traveler', 'receiver'].includes(String(role || ''))
+    ? `&role=${role}`
+    : '';
   let link;
   try {
     link = await stripeService.createConnectAccountLink(accountId, {
-      refreshUrl: `${returnUrl}?connect=refresh`,
-      returnUrl: `${returnUrl}?connect=done`,
+      refreshUrl: `${returnUrl}?connect=refresh${roleQ}`,
+      returnUrl: `${returnUrl}?connect=done${roleQ}`,
     });
   } catch (err) {
     throw new AppError(

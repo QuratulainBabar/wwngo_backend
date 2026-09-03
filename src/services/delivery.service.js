@@ -866,12 +866,11 @@ export async function acceptDeliveryAsReceiver(user, idOrPublicId, options = {})
 
   const walletRepo = await import('../repositories/wallet.repository.js');
   const wallet = await walletRepo.getWallet(user.id);
-  // When a receiver fee is due, chargeWalletOrCard opens Stripe Payment Sheet
-  // on shortfall (same as sender escrow / traveler handoff). Only require a
-  // pre-funded wallet when there is no fee to collect by card.
-  if (receiverFeeCents <= 0 && Number(wallet.available_cents) < requiredCents) {
+  if (Number(wallet.available_cents) < requiredCents) {
     throw new AppError(
-      `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
+      receiverFeeCents > 0
+        ? `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept (includes platform fee).`
+        : `Insufficient wallet balance. You need at least $${(requiredCents / 100).toFixed(2)} to accept.`,
       403,
       'INSUFFICIENT_WALLET'
     );

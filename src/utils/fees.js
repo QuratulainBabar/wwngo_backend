@@ -2,7 +2,7 @@
 
 export const MIN_WALLET_SENDER_CENTS = 200; // $2
 export const MIN_WALLET_RECEIVER_CENTS = 200; // $2
-export const MIN_WALLET_TRAVELER_CENTS = 200; // $2
+export const MIN_WALLET_TRAVELER_CENTS = 300; // $3
 
 export const MAX_TRAVELER_REQUESTS_PER_DELIVERY = 2;
 export const MAX_MEETUP_LOCATIONS = 3;
