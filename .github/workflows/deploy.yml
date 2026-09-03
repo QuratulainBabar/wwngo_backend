@@ -46,6 +46,7 @@ jobs:
 
             npm install --omit=dev
             npm run db:migrate
+            npm run db:seed
 
             echo "==> Restarting app with npx pm2"
             PM2_BIN="$APP_DIR/node_modules/.bin/pm2"

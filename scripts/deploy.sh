@@ -32,6 +32,9 @@ npm install --omit=dev
 echo "==> Running migrations"
 npm run db:migrate
 
+echo "==> Seeding admin user"
+npm run db:seed
+
 echo "==> Restarting app with npx pm2"
 PM2_BIN="$APP_DIR/node_modules/.bin/pm2"
 if [[ ! -x "$PM2_BIN" ]]; then
