@@ -94,11 +94,10 @@ export function minWalletCentsForSenderCreate(
 
 /**
  * Minimum receiver balance to accept.
- * When the receiver owes a platform fee, that amount is required; otherwise $2 minimum.
+ * Required only when the receiver owes a platform fee; $0 when the sender covers it.
  */
 export function minWalletCentsForReceiverAccept(parcelCategory, paysReceiverFee = false) {
-  const fee = receiverPlatformFeeCents(parcelCategory, paysReceiverFee);
-  return fee > 0 ? fee : MIN_WALLET_RECEIVER_CENTS;
+  return receiverPlatformFeeCents(parcelCategory, paysReceiverFee);
 }
 
 export function platformFeeDescription(shipmentId) {

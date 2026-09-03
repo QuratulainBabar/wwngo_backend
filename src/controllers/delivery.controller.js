@@ -136,3 +136,8 @@ export const openDispute = asyncHandler(async (req, res) => {
   const data = await deliveryService.openDispute(req.user, req.params.id, req.body || {});
   res.status(201).json({ success: true, data });
 });
+
+export const getOpenDispute = asyncHandler(async (req, res) => {
+  const data = await deliveryService.getOpenDispute(req.user, req.params.id);
+  res.json({ success: true, data });
+});

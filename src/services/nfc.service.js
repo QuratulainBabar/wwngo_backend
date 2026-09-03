@@ -15,6 +15,14 @@ function sameUserId(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
+async function loadCheckpointRow(deliveryId, checkpoint) {
+  const { rows } = await pool.query(
+    `SELECT * FROM nfc_checkpoints WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
+    [deliveryId, checkpoint]
+  );
+  return rows[0] || null;
+}
+
 export async function recordCheckpoint({
   deliveryId: deliveryIdOrPublic,
   userId,
@@ -29,26 +37,61 @@ export async function recordCheckpoint({
   const delivery = await getDeliveryForCheckpoint(deliveryId, userId, checkpoint);
   const deviceHash = deviceId ? hashDevice(deviceId) : null;
 
-  const { rows: existingRows } = await pool.query(
-    `SELECT * FROM nfc_checkpoints WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
-    [deliveryId, checkpoint]
-  );
-  const existing = existingRows[0];
+  let existing = await loadCheckpointRow(deliveryId, checkpoint);
 
   if (existing?.confirmed_at) {
     return mapCheckpoint(existing);
   }
 
+  // Traveler pays (or gets 402) on their own device. Actual debit happens
+  // when they complete the handshake, or when the sender completes it.
+  if (
+    checkpoint === 'handoff_sender_traveler' &&
+    sameUserId(userId, delivery.traveler_id)
+  ) {
+    const completing =
+      Boolean(existing) &&
+      !sameUserId(existing.initiator_id, userId) &&
+      !existing.confirmer_id;
+    if (completing) {
+      await escrowService.chargeTravelerHandoffFee(
+        delivery.traveler_id,
+        delivery.public_id,
+        delivery.parcel_category,
+        {
+          paymentIntentId: paymentIntentId || null,
+          allowPaymentRequired: true,
+        }
+      );
+    } else {
+      await escrowService.assertTravelerCanPayHandoffFee(
+        delivery.traveler_id,
+        delivery.public_id,
+        delivery.parcel_category,
+        { paymentIntentId: paymentIntentId || null }
+      );
+    }
+  }
+
   let record;
   if (!existing) {
-    const { rows } = await pool.query(
-      `INSERT INTO nfc_checkpoints (delivery_id, checkpoint, initiator_id, device_hash, gps_lat, gps_lng, confirmed_at)
-       VALUES ($1, $2::nfc_checkpoint_type, $3, $4, $5, $6, NULL)
-       RETURNING *`,
-      [deliveryId, checkpoint, userId, deviceHash, gpsLat, gpsLng]
-    );
-    record = rows[0];
-  } else {
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO nfc_checkpoints (delivery_id, checkpoint, initiator_id, device_hash, gps_lat, gps_lng, confirmed_at)
+         VALUES ($1, $2::nfc_checkpoint_type, $3, $4, $5, $6, NULL)
+         RETURNING *`,
+        [deliveryId, checkpoint, userId, deviceHash, gpsLat, gpsLng]
+      );
+      record = rows[0];
+    } catch (err) {
+      if (err?.code !== '23505') throw err;
+      existing = await loadCheckpointRow(deliveryId, checkpoint);
+      if (existing?.confirmed_at) return mapCheckpoint(existing);
+      if (!existing) throw err;
+    }
+  }
+
+  if (existing) {
     const isSecondParty =
       confirm &&
       !sameUserId(existing.initiator_id, userId) &&
@@ -92,20 +135,29 @@ export async function recordCheckpoint({
 
   if (record.confirmed_at) {
     try {
-      await applyCheckpointEffects(delivery, checkpoint, userId, { paymentIntentId });
+      await applyCheckpointEffects(delivery, checkpoint, userId);
     } catch (err) {
-      await pool.query(
-        `UPDATE nfc_checkpoints SET
-           confirmer_id = NULL,
-           confirmed_at = NULL
-         WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
-        [deliveryId, checkpoint]
+      const { rows: statusRows } = await pool.query(
+        `SELECT status FROM deliveries WHERE id = $1`,
+        [delivery.id]
       );
+      const status = statusRows[0]?.status;
+      const effectsApplied = ['collected', 'in_transit', 'delivered'].includes(status);
+      if (!effectsApplied) {
+        await pool.query(
+          `UPDATE nfc_checkpoints SET
+             confirmer_id = NULL,
+             confirmed_at = NULL
+           WHERE delivery_id = $1 AND checkpoint = $2::nfc_checkpoint_type`,
+          [deliveryId, checkpoint]
+        );
+      }
       console.error(
-        `[nfc] checkpoint ${checkpoint} effects failed for ${delivery.public_id} — rolled back confirmation:`,
+        `[nfc] checkpoint ${checkpoint} effects failed for ${delivery.public_id}` +
+          (effectsApplied ? ' — confirmation kept (delivery already advanced):' : ' — rolled back confirmation:'),
         err?.message || err
       );
-      throw err;
+      if (!effectsApplied) throw err;
     }
   }
 
@@ -130,6 +182,18 @@ async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
     if (!allowed.some((id) => sameUserId(id, userId))) {
       throw new AppError('Not authorized for this checkpoint', 403, 'FORBIDDEN');
     }
+    if (!d.traveler_id) {
+      throw new AppError('No traveler is assigned to this delivery', 400, 'NFC_NOT_READY');
+    }
+    if (!['ready_for_handoff', 'collected'].includes(d.status)) {
+      throw new AppError(
+        d.status === 'bid_accepted' || d.status === 'matched'
+          ? 'Confirm meetup location before NFC Checkpoint 1'
+          : 'NFC Checkpoint 1 is not available for this delivery yet',
+        400,
+        'NFC_NOT_READY'
+      );
+    }
   } else if (checkpoint === 'delivery_traveler_receiver') {
     const allowed = [d.traveler_id, d.receiver_id].filter(Boolean);
     if (!allowed.some((id) => sameUserId(id, userId))) {
@@ -140,7 +204,7 @@ async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
   return d;
 }
 
-async function applyCheckpointEffects(delivery, checkpoint, userId, options = {}) {
+async function applyCheckpointEffects(delivery, checkpoint, userId) {
   const publicId = delivery.public_id;
 
   if (checkpoint === 'handoff_sender_traveler') {
@@ -149,10 +213,7 @@ async function applyCheckpointEffects(delivery, checkpoint, userId, options = {}
         delivery.traveler_id,
         publicId,
         delivery.parcel_category,
-        {
-          paymentIntentId: options.paymentIntentId || null,
-          allowPaymentRequired: true,
-        }
+        { allowPaymentRequired: true }
       );
     }
 
@@ -270,7 +331,7 @@ export async function listCheckpoints(deliveryIdOrPublic, userId) {
   const d = dRows[0];
   if (!d) throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   const allowed = [d.sender_id, d.traveler_id, d.receiver_id].filter(Boolean);
-  if (!allowed.includes(userId)) {
+  if (!allowed.some((id) => sameUserId(id, userId))) {
     throw new AppError('Not authorized', 403, 'FORBIDDEN');
   }
 

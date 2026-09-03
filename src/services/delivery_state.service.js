@@ -12,13 +12,26 @@ const TRANSITIONS = {
   in_transit: ['delivered', 'disputed'],
   delivered: ['disputed'],
   cancelled: [],
-  disputed: ['delivered', 'cancelled'],
+    disputed: ['delivered', 'cancelled', 'bid_accepted', 'matched', 'ready_for_handoff', 'collected', 'in_transit'],
 };
 
 export function canTransition(from, to) {
   const allowed = TRANSITIONS[from] || [];
   return allowed.includes(to);
 }
+
+/** Booked deliveries where a dispute may be opened (escrow / parcel at risk). */
+export const DISPUTE_ALLOWED_STATUSES = [
+  'bid_accepted',
+  'matched',
+  'ready_for_handoff',
+  'collected',
+  'in_transit',
+  'delivered',
+];
+
+/** Receiver may dispute only after the parcel is with the traveler (or delivered). */
+export const DISPUTE_RECEIVER_STATUSES = ['collected', 'in_transit', 'delivered'];
 
 export async function transitionDelivery({
   deliveryId,

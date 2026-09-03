@@ -263,6 +263,7 @@ function mapDelivery(row, photos = []) {
     bidAmount: row.bid_amount != null ? Number(row.bid_amount) : null,
     meetupLocation: row.meetup_location || null,
     chatUnlocked: Boolean(row.chat_unlocked),
+    disputed: Boolean(row.disputed) || row.status === 'disputed',
     route: buildRouteLabel(row),
     photos: photos.map(mapPhoto),
     createdAt: row.created_at,
@@ -1027,7 +1028,10 @@ export async function submitReceiverPayment(
 }
 
 /**
- * Open a dispute on an active delivery.
+ * Open a dispute on a booked delivery (escrow / parcel at risk).
+ * Allowed statuses: bid_accepted → delivered. Not posted / waiting_receiver / cancelled.
+ * Receiver: collected, in_transit, or delivered only.
+ * Marks `deliveries.disputed` without replacing the lifecycle status so tracking stays intact.
  */
 export async function openDispute(user, idOrPublicId, { reason } = {}) {
   const text = String(reason || '').trim();
@@ -1035,6 +1039,99 @@ export async function openDispute(user, idOrPublicId, { reason } = {}) {
     throw new AppError('Dispute reason is required', 400, 'VALIDATION_ERROR');
   }
 
+  const delivery = await resolveDeliveryForParticipant(user, idOrPublicId);
+
+  const status = String(delivery.status || '');
+  if (status === 'cancelled') {
+    throw new AppError('Cannot dispute a cancelled delivery', 400, 'INVALID_STATUS');
+  }
+  if (status === 'disputed' || delivery.disputed) {
+    throw new AppError('A dispute is already open for this delivery', 409, 'DISPUTE_EXISTS');
+  }
+  if (!deliveryState.DISPUTE_ALLOWED_STATUSES.includes(status)) {
+    throw new AppError(
+      'Dispute is only available after a traveler is booked (from bid accepted through delivered)',
+      400,
+      'INVALID_STATUS'
+    );
+  }
+
+  const isSender = sameParticipant(user.id, delivery.sender_id);
+  const isTraveler = sameParticipant(user.id, delivery.traveler_id);
+  const isReceiver = sameParticipant(user.id, delivery.receiver_id);
+  if (!isSender && !isTraveler && !isReceiver) {
+    throw new AppError('Not authorized to dispute this delivery', 403, 'FORBIDDEN');
+  }
+  if (isReceiver && !isSender && !isTraveler) {
+    if (!deliveryState.DISPUTE_RECEIVER_STATUSES.includes(status)) {
+      throw new AppError(
+        'Receivers can dispute after the parcel is collected',
+        400,
+        'INVALID_STATUS'
+      );
+    }
+  }
+
+  const { rows: existing } = await pool.query(
+    `SELECT id FROM disputes WHERE delivery_id = $1 AND status IN ('open', 'under_review') LIMIT 1`,
+    [delivery.id]
+  );
+  if (existing[0]) {
+    throw new AppError('A dispute is already open for this delivery', 409, 'DISPUTE_EXISTS');
+  }
+
+  await pool.query(
+    `UPDATE deliveries SET disputed = TRUE, updated_at = NOW() WHERE id = $1`,
+    [delivery.id]
+  );
+
+  const { rows } = await pool.query(
+    `INSERT INTO disputes (delivery_id, opened_by, reason)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
+    [delivery.id, user.id, text]
+  );
+
+  await escrowService.freezeEscrowForDelivery(delivery.public_id).catch((err) => {
+    console.error(
+      `[dispute] freeze escrow failed for ${delivery.public_id}:`,
+      err?.message || err
+    );
+  });
+
+  return { dispute: rows[0], deliveryId: delivery.id, publicId: delivery.public_id };
+}
+
+export async function getOpenDispute(user, idOrPublicId) {
+  const delivery = await resolveDeliveryForParticipant(user, idOrPublicId);
+  const { rows } = await pool.query(
+    `SELECT * FROM disputes
+      WHERE delivery_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [delivery.id]
+  );
+  return {
+    dispute: rows[0]
+      ? {
+          id: rows[0].id,
+          reason: rows[0].reason,
+          status: rows[0].status,
+          resolution: rows[0].resolution,
+          createdAt: rows[0].created_at,
+          resolvedAt: rows[0].resolved_at,
+        }
+      : null,
+    deliveryStatus: delivery.status,
+    disputed: Boolean(delivery.disputed) || delivery.status === 'disputed',
+  };
+}
+
+function sameParticipant(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
+async function resolveDeliveryForParticipant(user, idOrPublicId) {
   const isUuid = /^[0-9a-f-]{36}$/i.test(String(idOrPublicId));
   let delivery = isUuid
     ? await deliveryRepository.findDeliveryByIdForSender(idOrPublicId, user.id)
@@ -1046,37 +1143,7 @@ export async function openDispute(user, idOrPublicId, { reason } = {}) {
   if (!delivery) {
     throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   }
-
-  if (['cancelled', 'delivered'].includes(delivery.status)) {
-    throw new AppError('Cannot dispute a completed or cancelled delivery', 400, 'INVALID_STATUS');
-  }
-
-  const { rows: existing } = await pool.query(
-    `SELECT id FROM disputes WHERE delivery_id = $1 AND status IN ('open', 'under_review') LIMIT 1`,
-    [delivery.id]
-  );
-  if (existing[0]) {
-    throw new AppError('A dispute is already open for this delivery', 409, 'DISPUTE_EXISTS');
-  }
-
-  const deliveryState = await import('./delivery_state.service.js');
-  await deliveryState.transitionDelivery({
-    deliveryId: delivery.id,
-    toStatus: 'disputed',
-    actorId: user.id,
-    note: text.slice(0, 500),
-  });
-
-  const { rows } = await pool.query(
-    `INSERT INTO disputes (delivery_id, opened_by, reason)
-     VALUES ($1, $2, $3)
-     RETURNING *`,
-    [delivery.id, user.id, text]
-  );
-
-  await escrowService.freezeEscrowForDelivery(delivery.public_id).catch(() => {});
-
-  return { dispute: rows[0], deliveryId: delivery.id, publicId: delivery.public_id };
+  return delivery;
 }
 
 function assertSenderCanModifyPostedDelivery(delivery) {

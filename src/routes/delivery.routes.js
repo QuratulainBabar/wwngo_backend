@@ -41,6 +41,7 @@ router.post('/:id/accept', authenticate, deliveryController.acceptDelivery);
 router.post('/:id/decline', authenticate, deliveryController.declineDelivery);
 router.post('/:id/receiver-payment', authenticate, deliveryController.submitReceiverPayment);
 router.post('/:id/dispute', authenticate, deliveryController.openDispute);
+router.get('/:id/dispute', authenticate, deliveryController.getOpenDispute);
 router.post('/:id/cancel', authenticate, deliveryController.cancelDelivery);
 router.patch(
   '/:id',

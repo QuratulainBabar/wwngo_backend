@@ -421,6 +421,57 @@ export async function freezeEscrowForDelivery(deliveryPublicId) {
   return { frozen: rowCount > 0 };
 }
 
+async function travelerHandoffAlreadyPaid(travelerId, deliveryPublicId) {
+  return (
+    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Platform fee')) ||
+    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Handoff fee'))
+  );
+}
+
+/**
+ * Ensures the traveler can cover the CP1 fee on their own device (402 if short)
+ * without charging until both parties have matched.
+ */
+export async function assertTravelerCanPayHandoffFee(
+  travelerId,
+  deliveryPublicId,
+  parcelCategory,
+  { paymentIntentId = null } = {}
+) {
+  if (paymentIntentId) {
+    const walletService = await import('./wallet.service.js');
+    await walletService.confirmTopUp(travelerId, paymentIntentId);
+  }
+  if (await travelerHandoffAlreadyPaid(travelerId, deliveryPublicId)) return;
+
+  const feeCents = travelerHandoffFeeCents(parcelCategory);
+  const wallet = await walletRepo.getWallet(travelerId);
+  const available = Number(wallet.available_cents);
+  const shortfall = feeCents - available;
+  if (shortfall <= 0) return;
+
+  if (!stripeService.isConfigured()) return;
+
+  const walletService = await import('./wallet.service.js');
+  const payment = await walletService.createTopUpPaymentIntent(
+    travelerId,
+    'traveler',
+    shortfall
+  );
+  throw new AppError(
+    'Card payment required to cover wallet shortfall',
+    402,
+    'PAYMENT_REQUIRED',
+    {
+      paymentIntentId: payment.paymentIntentId,
+      clientSecret: payment.clientSecret,
+      amountCents: shortfall,
+      role: 'traveler',
+      purpose: 'escrow_shortfall',
+    }
+  );
+}
+
 /**
  * Traveler platform fee ($2 documents / $4 objects) — charged at NFC CP1 handoff.
  * Safe to call again (skips if already paid).
@@ -431,9 +482,7 @@ export async function chargeTravelerHandoffFee(
   parcelCategory,
   { paymentIntentId = null, allowPaymentRequired = true } = {}
 ) {
-  const alreadyPaid =
-    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Platform fee')) ||
-    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Handoff fee'));
+  const alreadyPaid = await travelerHandoffAlreadyPaid(travelerId, deliveryPublicId);
   if (alreadyPaid) {
     return { charged: false, reason: 'already_paid' };
   }
