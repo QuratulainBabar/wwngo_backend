@@ -32,25 +32,29 @@ npm install --omit=dev
 echo "==> Running migrations"
 npm run db:migrate
 
-echo "==> Restarting app"
-mkdir -p tmp
-touch tmp/restart.txt || true
+echo "==> Seeding admin user"
+npm run db:seed
 
-if command -v pm2 >/dev/null 2>&1; then
-  if pm2 describe wwngo >/dev/null 2>&1; then
-    pm2 restart wwngo --update-env
-  else
-    pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
-    sleep 1
-    pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
-  fi
-  pm2 save || true
-else
-  pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
-  sleep 1
-  nohup npm start >>"$APP_DIR/app.log" 2>&1 &
-  echo "Started with nohup (logs: $APP_DIR/app.log)"
+echo "==> Restarting app with npx pm2"
+PM2_BIN="$APP_DIR/node_modules/.bin/pm2"
+if [[ ! -x "$PM2_BIN" ]]; then
+  echo "ERROR: pm2 binary missing at $PM2_BIN"
+  exit 1
 fi
+
+# Stop previous PM2 process if present.
+"$PM2_BIN" stop wwngo >/dev/null 2>&1 || true
+"$PM2_BIN" delete wwngo >/dev/null 2>&1 || true
+
+# Stop leftover bare `node src/index.js` only (avoid pkill-by-path self-kill).
+for pid in $(pgrep -f '^node .*(/wango/)?src/index\.js' || true); do
+  kill "$pid" 2>/dev/null || true
+done
+sleep 1
+
+"$PM2_BIN" start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
+"$PM2_BIN" save || true
+"$PM2_BIN" status || true
 
 echo "==> Health check"
 ok=0
@@ -65,8 +69,8 @@ for i in 1 2 3 4 5 6; do
 done
 if [[ "$ok" -ne 1 ]]; then
   echo "Health check failed"
-  pm2 status || true
-  tail -n 50 "$APP_DIR/app.log" 2>/dev/null || true
+  "$PM2_BIN" status || true
+  "$PM2_BIN" logs wwngo --lines 50 --nostream || true
   exit 1
 fi
 

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "db:migrate": "node src/db/migrate.js"
+    "db:migrate": "node src/db/migrate.js",
+    "db:seed": "node src/db/seed.js"
   },
   "engines": {
     "node": ">=18"
@@ -27,6 +28,7 @@
     "multer": "^2.2.0",
     "nodemailer": "^9.0.3",
     "pg": "^8.16.0",
+    "pm2": "^6.0.14",
     "socket.io": "^4.8.1",
     "stripe": "^18.4.0"
   }
