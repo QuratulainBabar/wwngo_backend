@@ -33,16 +33,17 @@ echo "==> Running migrations"
 npm run db:migrate
 
 echo "==> Restarting app with npx pm2"
-# Stop old nohup/manual node process so the port is free for PM2.
-pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
+# Stop previous PM2 process if present.
+npx --yes pm2 stop wwngo >/dev/null 2>&1 || true
+npx --yes pm2 delete wwngo >/dev/null 2>&1 || true
+
+# Stop leftover bare `node src/index.js` only (avoid pkill-by-path self-kill).
+for pid in $(pgrep -f '^node .*(/wango/)?src/index\.js' || true); do
+  kill "$pid" 2>/dev/null || true
+done
 sleep 1
 
-if npx --yes pm2 describe wwngo >/dev/null 2>&1; then
-  npx --yes pm2 restart wwngo --update-env
-else
-  npx --yes pm2 delete wwngo >/dev/null 2>&1 || true
-  npx --yes pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
-fi
+npx --yes pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
 npx --yes pm2 save || true
 npx --yes pm2 status || true
 
@@ -61,7 +62,6 @@ if [[ "$ok" -ne 1 ]]; then
   echo "Health check failed"
   npx --yes pm2 status || true
   npx --yes pm2 logs wwngo --lines 50 --nostream || true
-  tail -n 50 "$APP_DIR/app.log" 2>/dev/null || true
   exit 1
 fi
 
