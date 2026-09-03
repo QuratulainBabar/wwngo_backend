@@ -32,25 +32,19 @@ npm install --omit=dev
 echo "==> Running migrations"
 npm run db:migrate
 
-echo "==> Restarting app"
-mkdir -p tmp
-touch tmp/restart.txt || true
+echo "==> Restarting app with npx pm2"
+# Stop old nohup/manual node process so the port is free for PM2.
+pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
+sleep 1
 
-if command -v pm2 >/dev/null 2>&1; then
-  if pm2 describe wwngo >/dev/null 2>&1; then
-    pm2 restart wwngo --update-env
-  else
-    pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
-    sleep 1
-    pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
-  fi
-  pm2 save || true
+if npx --yes pm2 describe wwngo >/dev/null 2>&1; then
+  npx --yes pm2 restart wwngo --update-env
 else
-  pkill -f "$APP_DIR/src/index.js" 2>/dev/null || true
-  sleep 1
-  nohup npm start >>"$APP_DIR/app.log" 2>&1 &
-  echo "Started with nohup (logs: $APP_DIR/app.log)"
+  npx --yes pm2 delete wwngo >/dev/null 2>&1 || true
+  npx --yes pm2 start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
 fi
+npx --yes pm2 save || true
+npx --yes pm2 status || true
 
 echo "==> Health check"
 ok=0
@@ -65,7 +59,8 @@ for i in 1 2 3 4 5 6; do
 done
 if [[ "$ok" -ne 1 ]]; then
   echo "Health check failed"
-  pm2 status || true
+  npx --yes pm2 status || true
+  npx --yes pm2 logs wwngo --lines 50 --nostream || true
   tail -n 50 "$APP_DIR/app.log" 2>/dev/null || true
   exit 1
 fi
