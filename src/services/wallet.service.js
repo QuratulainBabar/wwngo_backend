@@ -600,9 +600,7 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet', r
   }
 
   const configured = String(env.appPublicUrl || '').replace(/\/$/, '');
-  // Stripe Account Links need a reachable return URL. LAN HTTP is accepted in
-  // test mode; the path must exist on this API (not a Flutter-only route).
-  const base = configured || 'http://172.16.11.26:3000';
+  const base = configured || 'https://wango.toolkitpro.cloud';
   const returnUrl = `${base}/connect/return`;
   const roleQ = ['sender', 'traveler', 'receiver'].includes(String(role || ''))
     ? `&role=${role}`

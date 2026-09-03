@@ -111,7 +111,7 @@ export const env = {
     fromNumber: cleanEnv(process.env.TWILIO_FROM),
     whatsappFrom: cleanEnv(process.env.TWILIO_WHATSAPP_FROM),
   },
-  appPublicUrl: cleanEnv(process.env.APP_PUBLIC_URL) || 'http://localhost:3000',
+  appPublicUrl: cleanEnv(process.env.APP_PUBLIC_URL) || 'https://wango.toolkitpro.cloud',
   s3: {
     bucket: cleanEnv(process.env.AWS_S3_BUCKET),
     region: cleanEnv(process.env.AWS_REGION || process.env.AWS_S3_REGION),
