@@ -714,8 +714,8 @@ export async function adminRefundEscrow(shipmentId, reason) {
 }
 
 /**
- * Wipe operational data for testing: deliveries, trips, notifications, escrows.
- * Users / wallets / auth are preserved.
+ * Wipe operational data for testing: deliveries, trips, chats, notifications,
+ * reviews, FCM tokens, escrows. Users / auth are kept; wallets are zeroed.
  */
 export async function clearOperationalData({ actorId } = {}) {
   const client = await pool.connect();
@@ -727,17 +727,39 @@ export async function clearOperationalData({ actorId } = {}) {
         (SELECT COUNT(*)::int FROM deliveries) AS deliveries,
         (SELECT COUNT(*)::int FROM trips) AS trips,
         (SELECT COUNT(*)::int FROM notifications) AS notifications,
-        (SELECT COUNT(*)::int FROM shipment_escrows) AS shipment_escrows
+        (SELECT COUNT(*)::int FROM chat_messages) AS chat_messages,
+        (SELECT COUNT(*)::int FROM reviews) AS reviews,
+        (SELECT COUNT(*)::int FROM device_tokens) AS device_tokens,
+        (SELECT COUNT(*)::int FROM shipment_escrows) AS shipment_escrows,
+        (SELECT COUNT(*)::int FROM wallet_ledger) AS wallet_ledger,
+        (SELECT COALESCE(SUM(available_cents), 0)::bigint FROM wallets) AS wallet_available_cents,
+        (SELECT COALESCE(SUM(escrow_cents), 0)::bigint FROM wallets) AS wallet_escrow_cents
     `);
 
     await client.query('DELETE FROM shipment_escrows');
-    await client.query(
-      `DELETE FROM wallet_ledger
-       WHERE shipment_id IS NOT NULL AND TRIM(shipment_id) <> ''`
-    );
+    await client.query('DELETE FROM wallet_ledger');
     await client.query('DELETE FROM notifications');
+    await client.query('DELETE FROM chat_messages');
+    await client.query('DELETE FROM conversation_reads');
+    await client.query('DELETE FROM conversations');
+    await client.query('DELETE FROM reviews');
+    await client.query('DELETE FROM device_tokens');
 
-    // Children cascade from deliveries/trips (chats, NFC, meetup, requests, offers, etc.).
+    await client.query(`
+      UPDATE wallets
+         SET available_cents = 0,
+             escrow_cents = 0,
+             updated_at = NOW()
+       WHERE available_cents <> 0 OR escrow_cents <> 0
+    `);
+    await client.query(`
+      UPDATE users
+         SET wallet_balance = 0,
+             updated_at = NOW()
+       WHERE COALESCE(wallet_balance, 0) <> 0
+    `);
+
+    // Children cascade from deliveries/trips (NFC, meetup, requests, offers, disputes, etc.).
     const deletedDeliveries = await client.query('DELETE FROM deliveries');
     const deletedTrips = await client.query('DELETE FROM trips');
 
@@ -746,7 +768,13 @@ export async function clearOperationalData({ actorId } = {}) {
         (SELECT COUNT(*)::int FROM deliveries) AS deliveries,
         (SELECT COUNT(*)::int FROM trips) AS trips,
         (SELECT COUNT(*)::int FROM notifications) AS notifications,
-        (SELECT COUNT(*)::int FROM shipment_escrows) AS shipment_escrows
+        (SELECT COUNT(*)::int FROM chat_messages) AS chat_messages,
+        (SELECT COUNT(*)::int FROM reviews) AS reviews,
+        (SELECT COUNT(*)::int FROM device_tokens) AS device_tokens,
+        (SELECT COUNT(*)::int FROM shipment_escrows) AS shipment_escrows,
+        (SELECT COUNT(*)::int FROM wallet_ledger) AS wallet_ledger,
+        (SELECT COALESCE(SUM(available_cents), 0)::bigint FROM wallets) AS wallet_available_cents,
+        (SELECT COALESCE(SUM(escrow_cents), 0)::bigint FROM wallets) AS wallet_escrow_cents
     `);
 
     await client.query('COMMIT');
@@ -763,10 +791,17 @@ export async function clearOperationalData({ actorId } = {}) {
         deliveries: deletedDeliveries.rowCount || 0,
         trips: deletedTrips.rowCount || 0,
         notifications: before.rows[0]?.notifications || 0,
+        chatMessages: before.rows[0]?.chat_messages || 0,
+        reviews: before.rows[0]?.reviews || 0,
+        deviceTokens: before.rows[0]?.device_tokens || 0,
         shipmentEscrows: before.rows[0]?.shipment_escrows || 0,
+        walletLedger: before.rows[0]?.wallet_ledger || 0,
+        walletAvailableCents: Number(before.rows[0]?.wallet_available_cents || 0),
+        walletEscrowCents: Number(before.rows[0]?.wallet_escrow_cents || 0),
       },
       remaining: after.rows[0],
-      message: 'Deliveries, trips, notifications, and related escrow rows were cleared. Users were kept.',
+      message:
+        'Deliveries, trips, messages, notifications, reviews, FCM tokens, and escrows were cleared. Wallets were zeroed. Users were kept.',
     };
   } catch (err) {
     await client.query('ROLLBACK');

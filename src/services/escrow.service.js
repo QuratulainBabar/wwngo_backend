@@ -15,6 +15,63 @@ function dollarsToCents(amount) {
   return Math.round(Number(amount) * 100);
 }
 
+function formatUsdFromCents(cents) {
+  return `$${(Number(cents) / 100).toFixed(2)}`;
+}
+
+function platformFeeRoute(role, shipmentId) {
+  const id = shipmentId ? String(shipmentId) : '';
+  if (role === 'traveler') {
+    return id ? `/shipment/${id}?traveler=true` : '/traveler-deliveries';
+  }
+  if (role === 'receiver') {
+    return id ? `/receiver-parcel/${id}` : '/receiver-home';
+  }
+  return id ? `/track/${id}` : '/wallet?role=sender';
+}
+
+/**
+ * JazzCash-style alert after a platform fee is collected from wallet and/or card.
+ */
+async function notifyPlatformFeeCharged({
+  userId,
+  role,
+  amountCents,
+  walletCents,
+  cardCents,
+  shipmentId,
+}) {
+  const total = formatUsdFromCents(amountCents);
+  const shipmentLabel = shipmentId ? String(shipmentId) : 'your delivery';
+  const fromWallet = Number(walletCents) > 0;
+  const fromCard = Number(cardCents) > 0;
+
+  let body;
+  if (fromWallet && fromCard) {
+    body =
+      `${total} platform fee paid for ${shipmentLabel} ` +
+      `(${formatUsdFromCents(walletCents)} from wallet + ${formatUsdFromCents(cardCents)} from card).`;
+  } else if (fromCard) {
+    body = `${total} platform fee deducted from your card for ${shipmentLabel}.`;
+  } else {
+    body = `${total} platform fee deducted from your wallet for ${shipmentLabel}.`;
+  }
+
+  try {
+    const notificationCreateService = await import('./notification_create.service.js');
+    await notificationCreateService.createNotification({
+      userId: String(userId),
+      role: String(role || 'sender'),
+      type: 'platformFee',
+      title: 'Platform fee paid',
+      body,
+      route: platformFeeRoute(role, shipmentId),
+    });
+  } catch (err) {
+    console.warn('[escrow] platform fee notification failed:', err?.message || err);
+  }
+}
+
 /**
  * Charge wallet. When Stripe is configured and balance is short, creates a
  * PaymentIntent and throws PAYMENT_REQUIRED (client completes Payment Sheet).
@@ -29,13 +86,21 @@ export async function chargeWalletOrCard({
   shipmentId = null,
   paymentIntentId = null,
   allowPaymentRequired = true,
+  /** Force notification wording: 'wallet' | 'card' | 'mixed' | null (detect). */
+  paidVia = null,
 }) {
   const cents = Number(amountCents);
   if (cents <= 0) return { charged: false, amountCents: 0 };
 
+  const walletBeforeTopUp = await walletRepo.getWallet(userId);
+  const availableBeforeTopUp = Number(walletBeforeTopUp.available_cents);
+  let cardCents = 0;
+
   if (paymentIntentId) {
     const walletService = await import('./wallet.service.js');
     await walletService.confirmTopUp(userId, paymentIntentId);
+    // Card covered whatever the wallet was short before this top-up.
+    cardCents = Math.max(0, cents - availableBeforeTopUp);
   }
 
   const wallet = await walletRepo.getWallet(userId);
@@ -65,7 +130,8 @@ export async function chargeWalletOrCard({
       );
     }
 
-    // Dev / mock mode: invent card funds so E2E still works without Stripe keys.
+    // Dev / mock mode (or booking path with allowPaymentRequired=false):
+    // invent card funds so fee collection can finish without Payment Sheet.
     await walletRepo.appendLedgerEntry({
       userId,
       role,
@@ -76,6 +142,7 @@ export async function chargeWalletOrCard({
       shipmentId,
       hiddenFromHistory: true,
     });
+    cardCents += shortfall;
   }
 
   await walletRepo.appendLedgerEntry({
@@ -88,7 +155,35 @@ export async function chargeWalletOrCard({
     shipmentId,
   });
 
-  return { charged: true, amountCents: cents };
+  if (type === 'platform_fee') {
+    let notifyWallet = Math.max(0, cents - cardCents);
+    let notifyCard = Math.min(cardCents, cents);
+    if (paidVia === 'card') {
+      notifyWallet = 0;
+      notifyCard = cents;
+    } else if (paidVia === 'wallet') {
+      notifyWallet = cents;
+      notifyCard = 0;
+    } else if (paidVia === 'mixed' && notifyCard <= 0) {
+      notifyCard = Math.max(1, Math.round(cents / 2));
+      notifyWallet = cents - notifyCard;
+    }
+    void notifyPlatformFeeCharged({
+      userId,
+      role,
+      amountCents: cents,
+      walletCents: notifyWallet,
+      cardCents: notifyCard,
+      shipmentId,
+    });
+  }
+
+  return {
+    charged: true,
+    amountCents: cents,
+    walletCents: Math.max(0, cents - cardCents),
+    cardCents: Math.min(cardCents, cents),
+  };
 }
 
 async function getDeliveryRow(publicId) {
@@ -238,6 +333,8 @@ export async function holdEscrowForDelivery({
         description: platformFeeDescription(deliveryPublicId),
         shipmentId: deliveryPublicId,
         allowPaymentRequired: false,
+        // Stripe Pay Now topped up the full amount from card first.
+        paidVia: paymentMethod === 'stripe' ? 'card' : null,
       });
     }
 

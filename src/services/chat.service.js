@@ -4,8 +4,6 @@ import { pool } from '../db/pool.js';
 import {
   emitToConversation,
   emitToUser,
-  isUserInConversation,
-  isUserOnline,
 } from './socket_hub.js';
 import { sendPushToUser } from './fcm.service.js';
 
@@ -198,53 +196,25 @@ export async function sendMessage(userId, conversationId, body) {
       'CHAT_LOCKED'
     );
   }
-  const recipientId = peerId(row, userId);
-  const inThread = recipientId
-    ? await isUserInConversation(recipientId, conversationId)
-    : false;
-  const online = inThread || (recipientId ? await isUserOnline(recipientId) : false);
-  const now = new Date();
   const message = await chatRepository.insertMessage({
     conversationId,
     senderId: userId,
     body: text || (imageUrl ? 'Photo' : ''),
     isImage: Boolean(imageUrl),
     imageName: imageUrl,
-    deliveredAt: online ? now : null,
-    readAt: inThread ? now : null,
+    deliveredAt: null,
+    readAt: null,
   });
   const mapped = mapMessage(message, userId);
-  // Broadcast a viewer-neutral payload. `mapped.isMine` is only correct for the
-  // sender, so include the raw senderId and let each client decide `isMine` for
-  // itself — otherwise the recipient would render incoming messages as its own.
-  const payload = {
-    ...mapped,
-    id: String(message.id),
-    senderId: String(message.sender_id),
-    conversationId: String(conversationId),
-    isMine: false,
-  };
-  emitToConversation(conversationId, 'chat_message', payload);
-  if (recipientId) emitToUser(recipientId, 'chat_message', payload);
 
-  // Fan out the initial receipt to the sender's user room so ticks update live
-  // even if the HTTP response is slow or the open chat missed the status field.
-  if (mapped.status === 'delivered' || mapped.status === 'read') {
-    emitToUser(userId, 'message_receipts', {
-      conversationId: String(conversationId),
-      status: mapped.status,
-      messageIds: [String(message.id)],
-      at: new Date().toISOString(),
-    });
-  }
-
-  // Push the message to the peer when they aren't already watching the thread.
-  // Fire-and-forget: chat delivery must not depend on FCM.
+  // Chat live updates use FCM (not Socket.io). Always push so an open thread
+  // can resync via the foreground handler.
   void notifyChatRecipient({
     conversation: row,
     senderId: userId,
     text: message.body,
     isImage: message.is_image,
+    messageId: message.id,
   }).catch((err) => {
     console.warn('[chat] recipient push failed:', err?.message || err);
   });
@@ -253,19 +223,21 @@ export async function sendMessage(userId, conversationId, body) {
 }
 
 /**
- * Send an FCM push to the other participant of a conversation for a new
- * message. Skipped when the recipient currently has the thread open (they get
- * the message live over the socket) or when no recipient can be resolved.
+ * Send an FCM push to the other participant for a new chat message.
+ * Always sent — clients refresh open threads from this push (no chat sockets).
  */
-async function notifyChatRecipient({ conversation, senderId, text, isImage }) {
+async function notifyChatRecipient({
+  conversation,
+  senderId,
+  text,
+  isImage,
+  messageId,
+}) {
   const recipientId =
     String(conversation.participant_a_id) === String(senderId)
       ? conversation.participant_b_id
       : conversation.participant_a_id;
   if (!recipientId || String(recipientId) === String(senderId)) return;
-
-  // Don't double-notify someone already reading the thread.
-  if (await isUserInConversation(recipientId, conversation.id)) return;
 
   // Resolve the sender's display name (push title) and the recipient's role in
   // this delivery (for a role-correct deep link).
@@ -293,7 +265,8 @@ async function notifyChatRecipient({ conversation, senderId, text, isImage }) {
     data: {
       type: 'chatMessage',
       route: `/${rolePath}/${conversation.id}`,
-      conversationId: conversation.id,
+      conversationId: String(conversation.id),
+      messageId: messageId != null ? String(messageId) : '',
     },
   });
 }
