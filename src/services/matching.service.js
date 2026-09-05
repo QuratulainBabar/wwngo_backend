@@ -87,9 +87,12 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
 }
 
 /**
- * Returns travelers whose trip To matches the delivery To and whose luggage
- * capacity is at least the delivery parcel weight.
- * City-to-city compares to_city labels; country-to-country compares country codes/names.
+ * Returns travelers whose trip To matches the delivery To (same destination
+ * route) and whose luggage capacity covers the parcel weight.
+ * Count is dynamic: every open trip that matches is returned (1, 2, 3, …).
+ * City-to-city compares to_city labels (including city-head forms like
+ * "Paris, France" ↔ "Paris, Île-de-France, France");
+ * country-to-country compares country codes/names.
  *
  * Own trips are excluded so sender, traveler, and receiver stay on separate
  * Gmail accounts — the sender cannot match their own traveler trip.

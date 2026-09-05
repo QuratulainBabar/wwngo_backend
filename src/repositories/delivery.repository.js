@@ -609,6 +609,9 @@ export async function listDeliveriesForTripSenderNotification({
   limit = 200,
 } = {}) {
   const label = String(destinationLabel ?? '').trim().toLowerCase();
+  // City head broadens SQL prefilter; destinationsMatch does final check.
+  const cityHead = label.split(',')[0].trim();
+  const searchLabel = cityHead || label;
   const code = String(destinationCode ?? '').trim().toUpperCase();
   const codeUsable = code && code !== 'XX' ? code : '';
 
@@ -625,8 +628,12 @@ export async function listDeliveriesForTripSenderNotification({
            AND $4 <> ''
            AND (
              LOWER(COALESCE(d.to_city, '')) = $4
+             OR LOWER(COALESCE(d.to_city, '')) = $5
              OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $4 || '%'
+             OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $5 || '%'
              OR $4 LIKE '%' || LOWER(COALESCE(d.to_city, '')) || '%'
+             OR $5 LIKE '%' || LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) || '%'
+             OR LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) = $5
            )
          )
          OR (
@@ -634,7 +641,10 @@ export async function listDeliveriesForTripSenderNotification({
            AND (
              (
                $3 <> ''
-               AND UPPER(COALESCE(d.to_code, '')) = $3
+               AND (
+                 UPPER(COALESCE(d.to_code, '')) = $3
+                 OR UPPER(COALESCE(d.destination_country_code, '')) = $3
+               )
              )
              OR (
                $4 <> ''
@@ -648,8 +658,8 @@ export async function listDeliveriesForTripSenderNotification({
          )
        )
      ORDER BY d.created_at DESC
-     LIMIT $5`,
-    [tripType, excludeSenderId, codeUsable, label, limit]
+     LIMIT $6`,
+    [tripType, excludeSenderId, codeUsable, label, searchLabel, limit]
   );
   return rows;
 }

@@ -286,6 +286,11 @@ export async function listOpenTripsForDestinationMatch({
   limit = 100,
 } = {}) {
   const label = String(destinationLabel ?? '').trim().toLowerCase();
+  // City head (before first comma) broadens SQL prefilter so
+  // "Paris, France" can find "Paris, Île-de-France, France". Final equality
+  // is still enforced by destinationsMatch in matching.service.js.
+  const cityHead = label.split(',')[0].trim();
+  const searchLabel = cityHead || label;
   const code = String(destinationCode ?? '').trim().toUpperCase();
   const codeUsable = code && code !== 'XX' ? code : '';
 
@@ -306,8 +311,12 @@ export async function listOpenTripsForDestinationMatch({
            AND $4 <> ''
            AND (
              LOWER(COALESCE(t.to_city, '')) = $4
+             OR LOWER(COALESCE(t.to_city, '')) = $5
              OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $4 || '%'
+             OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $5 || '%'
              OR $4 LIKE '%' || LOWER(COALESCE(t.to_city, '')) || '%'
+             OR $5 LIKE '%' || LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) || '%'
+             OR LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) = $5
            )
          )
          OR (
@@ -329,8 +338,8 @@ export async function listOpenTripsForDestinationMatch({
          )
        )
      ORDER BY t.travel_date ASC, t.created_at DESC
-     LIMIT $5`,
-    [tripType, excludeTravelerId || null, codeUsable, label, limit]
+     LIMIT $6`,
+    [tripType, excludeTravelerId || null, codeUsable, label, searchLabel, limit]
   );
   return rows;
 }

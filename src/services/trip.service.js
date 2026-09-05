@@ -73,7 +73,9 @@ export function mapTrip(row) {
     destinationCountryCode: row.destination_country_code,
     destinationAirport: row.destination_airport,
     travelDate: formatDateOnly(row.travel_date),
-    luggageCapacityKg: Number(row.luggage_capacity_kg),
+    luggageCapacityKg: Number.isFinite(Number(row.luggage_capacity_kg))
+      ? Number(row.luggage_capacity_kg)
+      : null,
     flightNumber: row.flight_number,
     origin: row.trip_type === 'country_to_country' ? row.origin_country : row.from_city,
     destination:
