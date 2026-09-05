@@ -194,7 +194,8 @@ export async function markDeliveredForRecipient(userId) {
 
 /**
  * Mark a single message delivered when the recipient device ACKs it.
- * No-op (empty) if the caller is not the other participant or it was already delivered.
+ * If it was already delivered (e.g. presence marked it at send time), still
+ * return the row so the sender can be notified for live tick updates.
  */
 export async function markMessageDelivered(messageId, recipientId) {
   const { rows } = await pool.query(
@@ -206,10 +207,22 @@ export async function markMessageDelivered(messageId, recipientId) {
        AND m.sender_id <> $2
        AND (c.participant_a_id = $2 OR c.participant_b_id = $2)
        AND m.delivered_at IS NULL
-     RETURNING m.id, m.conversation_id, m.sender_id`,
+     RETURNING m.id, m.conversation_id, m.sender_id, m.delivered_at, m.read_at`,
     [messageId, recipientId]
   );
-  return rows[0] || null;
+  if (rows[0]) return rows[0];
+
+  const existing = await pool.query(
+    `SELECT m.id, m.conversation_id, m.sender_id, m.delivered_at, m.read_at
+     FROM chat_messages m
+     JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.id = $1
+       AND m.sender_id <> $2
+       AND (c.participant_a_id = $2 OR c.participant_b_id = $2)
+       AND m.delivered_at IS NOT NULL`,
+    [messageId, recipientId]
+  );
+  return existing.rows[0] || null;
 }
 
 /**

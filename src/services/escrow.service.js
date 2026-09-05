@@ -4,7 +4,10 @@ import * as walletRepo from '../repositories/wallet.repository.js';
 import * as stripeService from './stripe.service.js';
 import {
   resolveSenderPlatformFeeCents,
+  receiverPlatformFeeCents,
+  senderPaysReceiverFee,
   travelerHandoffFeeCents,
+  travelerPlatformFeeCents,
   platformFeeDescription,
 } from '../utils/fees.js';
 
@@ -115,17 +118,45 @@ export async function holdEscrowForDelivery({
   }
 
   const existing = await walletRepo.getShipmentEscrow(deliveryPublicId);
+  const delivery = await getDeliveryRow(deliveryPublicId);
+  if (!delivery) {
+    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
+  }
+
   if (existing && existing.status === 'held') {
+    // Resume path: escrow already held — still collect any missing party fees.
+    try {
+      const senderFee = resolveSenderPlatformFeeCents(delivery);
+      const senderFeeAlreadyPaid = await hasPlatformFeePaid(
+        senderId,
+        'sender',
+        deliveryPublicId,
+        'Platform fee'
+      );
+      if (!senderFeeAlreadyPaid && senderFee > 0) {
+        await chargeWalletOrCard({
+          userId: senderId,
+          role: 'sender',
+          amountCents: senderFee,
+          description: platformFeeDescription(deliveryPublicId),
+          shipmentId: deliveryPublicId,
+          allowPaymentRequired: false,
+        });
+      }
+      await chargeBookingPlatformFees({ delivery, deliveryPublicId });
+    } catch (err) {
+      await refundEscrowForDelivery(deliveryPublicId, 'Booking failed — escrow reversed').catch(() => {});
+      await refundPlatformFeesForDelivery(
+        deliveryPublicId,
+        'Booking failed — platform fee reversed'
+      ).catch(() => {});
+      throw err;
+    }
     return {
       shipmentId: deliveryPublicId,
       amountCents: Number(existing.amount_cents),
       status: 'held',
     };
-  }
-
-  const delivery = await getDeliveryRow(deliveryPublicId);
-  if (!delivery) {
-    throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   }
 
   const senderFee = resolveSenderPlatformFeeCents(delivery);
@@ -138,17 +169,29 @@ export async function holdEscrowForDelivery({
   const totalNeeded =
     amountCents + (senderFeeAlreadyPaid ? 0 : senderFee);
 
-  if (paymentIntentId) {
-    const walletService = await import('./wallet.service.js');
-    await walletService.confirmTopUp(senderId, paymentIntentId);
-  }
+  let stripePaymentIntentId = paymentIntentId || null;
 
-  const wallet = await walletRepo.getWallet(senderId);
-  const available = Number(wallet.available_cents);
-  const shortfall = totalNeeded - available;
+  if (paymentMethod === 'stripe') {
+    // Stripe Pay Now: charge the full escrow + sender fee on card only.
+    // The PaymentIntent is confirmed into the wallet, then the same amount is
+    // debited for escrow/fees — prior wallet balance is left unchanged.
+    stripePaymentIntentId = await requireFullStripePayment({
+      senderId,
+      paymentIntentId,
+      totalNeeded,
+      deliveryPublicId,
+    });
+  } else {
+    if (paymentIntentId) {
+      const walletService = await import('./wallet.service.js');
+      await walletService.confirmTopUp(senderId, paymentIntentId);
+    }
 
-  if (shortfall > 0) {
-    if (paymentMethod === 'wallet') {
+    const wallet = await walletRepo.getWallet(senderId);
+    const available = Number(wallet.available_cents);
+    const shortfall = totalNeeded - available;
+
+    if (shortfall > 0) {
       throw new AppError(
         'Insufficient wallet balance. Add funds or pay with card.',
         403,
@@ -162,41 +205,8 @@ export async function holdEscrowForDelivery({
         }
       );
     }
-
-    if (stripeService.isConfigured()) {
-      const payment = await createEscrowShortfallIntent(
-        senderId,
-        shortfall,
-        deliveryPublicId
-      );
-      throw new AppError(
-        'Insufficient wallet balance. Complete card payment to fund escrow and fees.',
-        402,
-        'PAYMENT_REQUIRED',
-        {
-          paymentIntentId: payment.paymentIntentId,
-          clientSecret: payment.clientSecret,
-          amountCents: shortfall,
-          role: 'sender',
-          purpose: 'escrow_shortfall',
-          shipmentId: deliveryPublicId,
-        }
-      );
-    }
-
-    await walletRepo.appendLedgerEntry({
-      userId: senderId,
-      role: 'sender',
-      type: 'top_up',
-      amountCents: shortfall,
-      availableDeltaCents: shortfall,
-      description: 'Card fallback for escrow',
-      shipmentId: deliveryPublicId,
-      hiddenFromHistory: true,
-    });
   }
 
-  let stripePaymentIntentId = paymentIntentId || null;
   try {
     await walletRepo.appendLedgerEntry({
       userId: senderId,
@@ -231,12 +241,20 @@ export async function holdEscrowForDelivery({
       });
     }
 
-    // Receiver platform fee ($2 docs / $3 objects) is charged at receiver accept.
-    // Traveler platform fee ($2 docs / $4 objects) is charged at NFC CP1 handoff.
+    // All three platform fees are collected at Pay Now (wallet first, then card).
+    // If traveler or receiver cannot pay, reverse escrow + any fees and abort booking.
+    await chargeBookingPlatformFees({
+      delivery,
+      deliveryPublicId,
+    });
 
     return { shipmentId: deliveryPublicId, amountCents, status: 'held', stripePaymentIntentId };
   } catch (err) {
     await refundEscrowForDelivery(deliveryPublicId, 'Booking failed — escrow reversed').catch(() => {});
+    await refundPlatformFeesForDelivery(
+      deliveryPublicId,
+      'Booking failed — platform fee reversed'
+    ).catch(() => {});
     if (err.code === 'INSUFFICIENT_BALANCE') {
       throw new AppError(
         'Insufficient wallet balance. Platform fees could not be collected; booking was not created.',
@@ -246,6 +264,159 @@ export async function holdEscrowForDelivery({
     }
     throw err;
   }
+}
+
+async function getPaymentIntentAmountCents(paymentIntentId) {
+  if (!paymentIntentId) return 0;
+  try {
+    const intent = await stripeService.retrievePaymentIntent(paymentIntentId);
+    if (!intent) return 0;
+    if (intent.status !== 'succeeded' && !intent.mock) return 0;
+    return Number(intent.amount) || Number(intent.metadata?.amountCents) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Stripe Pay Now must cover the full escrow + sender fee amount on card.
+ * Confirms the PaymentIntent into the wallet only when it already covers
+ * totalNeeded; otherwise opens a Payment Sheet for the full amount.
+ */
+async function requireFullStripePayment({
+  senderId,
+  paymentIntentId,
+  totalNeeded,
+  deliveryPublicId,
+}) {
+  const walletService = await import('./wallet.service.js');
+
+  if (paymentIntentId) {
+    await walletService.confirmTopUp(senderId, paymentIntentId);
+    const paidCents = await getPaymentIntentAmountCents(paymentIntentId);
+    if (paidCents >= totalNeeded) {
+      return paymentIntentId;
+    }
+  }
+
+  if (stripeService.isConfigured()) {
+    const payment = await createEscrowShortfallIntent(
+      senderId,
+      totalNeeded,
+      deliveryPublicId
+    );
+    throw new AppError(
+      'Complete card payment for the full escrow and fee amount.',
+      402,
+      'PAYMENT_REQUIRED',
+      {
+        paymentIntentId: payment.paymentIntentId,
+        clientSecret: payment.clientSecret,
+        amountCents: totalNeeded,
+        role: 'sender',
+        purpose: 'escrow_shortfall',
+        shipmentId: deliveryPublicId,
+      }
+    );
+  }
+
+  // Dev / mock mode: invent card funds for the full amount (no Stripe keys).
+  await walletRepo.appendLedgerEntry({
+    userId: senderId,
+    role: 'sender',
+    type: 'top_up',
+    amountCents: totalNeeded,
+    availableDeltaCents: totalNeeded,
+    description: 'Card fallback for escrow',
+    shipmentId: deliveryPublicId,
+    hiddenFromHistory: true,
+  });
+  return paymentIntentId || null;
+}
+
+/**
+ * Charge traveler + receiver platform fees at Pay Now (sender fee already charged above).
+ * Wallet first; shortfall is covered from that user's card (same chargeWalletOrCard path).
+ */
+async function chargeBookingPlatformFees({ delivery, deliveryPublicId }) {
+  const travelerId = delivery.traveler_id || null;
+  const receiverId = delivery.receiver_id || null;
+  const category = delivery.parcel_category || 'documents';
+  const paysReceiver = senderPaysReceiverFee(delivery);
+
+  if (!travelerId) {
+    throw new AppError(
+      'Traveler is not assigned. Platform fees could not be collected; booking was not created.',
+      400,
+      'TRAVELER_REQUIRED'
+    );
+  }
+  if (!receiverId) {
+    throw new AppError(
+      'Receiver has not accepted yet. Platform fees could not be collected; booking was not created.',
+      400,
+      'RECEIVER_REQUIRED'
+    );
+  }
+
+  const travelerFee = travelerPlatformFeeCents(category);
+  const travelerAlreadyPaid = await travelerHandoffAlreadyPaid(travelerId, deliveryPublicId);
+  if (!travelerAlreadyPaid && travelerFee > 0) {
+    try {
+      await chargeWalletOrCard({
+        userId: travelerId,
+        role: 'traveler',
+        amountCents: travelerFee,
+        description: platformFeeDescription(deliveryPublicId),
+        shipmentId: deliveryPublicId,
+        allowPaymentRequired: false,
+      });
+    } catch (err) {
+      throw new AppError(
+        'Traveler platform fee could not be collected. Booking was not created.',
+        err.statusCode || 403,
+        err.code === 'PAYMENT_REQUIRED' ? 'PAYMENT_REQUIRED' : 'INSUFFICIENT_WALLET',
+        { ...(err.details || {}), role: 'traveler', shipmentId: deliveryPublicId }
+      );
+    }
+  }
+
+  const receiverFee = receiverPlatformFeeCents(category, paysReceiver);
+  const receiverAlreadyPaid = await hasPlatformFeePaid(
+    receiverId,
+    'receiver',
+    deliveryPublicId,
+    'Platform fee'
+  );
+  if (!receiverAlreadyPaid && receiverFee > 0) {
+    try {
+      await chargeWalletOrCard({
+        userId: receiverId,
+        role: 'receiver',
+        amountCents: receiverFee,
+        description: platformFeeDescription(deliveryPublicId),
+        shipmentId: deliveryPublicId,
+        allowPaymentRequired: false,
+      });
+    } catch (err) {
+      throw new AppError(
+        'Receiver platform fee could not be collected. Booking was not created.',
+        err.statusCode || 403,
+        err.code === 'PAYMENT_REQUIRED' ? 'PAYMENT_REQUIRED' : 'INSUFFICIENT_WALLET',
+        { ...(err.details || {}), role: 'receiver', shipmentId: deliveryPublicId }
+      );
+    }
+  }
+
+  await pool.query(
+    `UPDATE deliveries
+     SET receiver_paid_at = COALESCE(receiver_paid_at, NOW()),
+         receiver_fee_cents = $2,
+         receiver_payment_due_at = NULL,
+         updated_at = NOW()
+     WHERE public_id = $1`,
+    [deliveryPublicId, receiverFee]
+  );
 }
 
 async function createEscrowShortfallIntent(userId, amountCents, shipmentId) {
@@ -473,7 +644,8 @@ export async function assertTravelerCanPayHandoffFee(
 }
 
 /**
- * Traveler platform fee ($2 documents / $4 objects) — charged at NFC CP1 handoff.
+ * Traveler platform fee ($2 documents / $4 objects).
+ * Normally collected at Pay Now; kept as an idempotent safety net at NFC CP1.
  * Safe to call again (skips if already paid).
  */
 export async function chargeTravelerHandoffFee(

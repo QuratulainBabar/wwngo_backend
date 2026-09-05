@@ -93,8 +93,8 @@ export function minWalletCentsForSenderCreate(
 }
 
 /**
- * Minimum receiver balance to accept.
- * Required only when the receiver owes a platform fee; $0 when the sender covers it.
+ * Minimum receiver balance historically used at accept.
+ * Receiver platform fee is now charged at sender Pay Now — accept is consent only.
  */
 export function minWalletCentsForReceiverAccept(parcelCategory, paysReceiverFee = false) {
   return receiverPlatformFeeCents(parcelCategory, paysReceiverFee);

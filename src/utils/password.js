@@ -14,10 +14,12 @@ try {
 
 const ROUNDS = 12;
 
-/** Strip autofill newlines; never treat a non-string as a password. */
+/** Strip autofill newlines/whitespace; never treat a non-string as a password. */
 export function normalizePasswordInput(password) {
   if (typeof password !== 'string') return '';
-  return password.replace(/\r?\n/g, '');
+  // Trim ends: browser/password-manager autofill often appends a trailing space
+  // or newline that was not present when the account was created.
+  return password.replace(/\r?\n/g, '').trim();
 }
 
 function hashToString(hash) {

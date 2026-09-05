@@ -4,6 +4,13 @@ import * as requestRepository from '../repositories/trip_sender_request.reposito
 import * as offerRepository from '../repositories/trip_counter_offer.repository.js';
 import * as notificationCreateService from './notification_create.service.js';
 import { sendSenderOfferAcceptedEmail } from './email.service.js';
+import * as tripRepository from '../repositories/trip.repository.js';
+import { assertTripCanCarryParcel } from '../utils/luggage_capacity.js';
+
+async function assertTripCapacityForDelivery(tripId, weightKg) {
+  const trip = tripId ? await tripRepository.findTripById(tripId) : null;
+  assertTripCanCarryParcel(trip?.luggage_capacity_kg, weightKg);
+}
 
 function formatDateOnly(value) {
   if (value == null) return null;
@@ -151,6 +158,8 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
   if (!request) {
     throw new AppError('Sender request not found', 404, 'NOT_FOUND');
   }
+
+  await assertTripCapacityForDelivery(request.trip_id, request.weight_kg);
 
   const existing = await offerRepository.findOfferByRequestId(requestId, travelerId);
   if (existing && !['pending', 'updated'].includes(existing.status)) {
@@ -407,7 +416,10 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
   const tripId = mapped.tripId || rawRow.trip_id;
   const amount = Number(mapped.amount) || Number(rawRow.amount) || 0;
 
-  // Assign traveler before escrow; traveler platform fee is charged at NFC CP1 handoff.
+  await assertTripCapacityForDelivery(tripId, rawRow.weight_kg);
+
+  // Assign traveler before escrow; platform fees for sender/traveler/receiver
+  // are all collected inside holdEscrowForDelivery (Pay Now).
   await pool.query(
     `UPDATE deliveries
      SET traveler_id = $2, trip_id = $3, bid_amount = $4, updated_at = NOW()
@@ -441,7 +453,15 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
   );
 
   const timerService = await import('./timer.service.js');
-  await timerService.scheduleReceiverPayment(deliveryId);
+  // Receiver fee is collected at Pay Now; only schedule the legacy unpaid timer
+  // if payment somehow was not recorded.
+  const { rows: paidRows } = await pool.query(
+    `SELECT receiver_paid_at FROM deliveries WHERE id = $1`,
+    [deliveryId]
+  );
+  if (!paidRows[0]?.receiver_paid_at) {
+    await timerService.scheduleReceiverPayment(deliveryId);
+  }
 
   await transitionDelivery({
     deliveryId,

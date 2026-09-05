@@ -138,6 +138,18 @@ function assertNotLocked(userRow) {
   }
 }
 
+/** After lockout expires, reset counters so the next attempt is a clean slate. */
+async function clearExpiredLockout(userRow) {
+  if (!userRow) return userRow;
+  const lockedUntil = userRow.locked_until ? new Date(userRow.locked_until) : null;
+  if (lockedUntil && lockedUntil <= new Date()) {
+    await clearFailedLogins(userRow.id);
+    userRow.failed_login_attempts = 0;
+    userRow.locked_until = null;
+  }
+  return userRow;
+}
+
 async function findUserByEmail(email) {
   const normalized = normalizeEmail(email);
   if (!normalized) return null;
@@ -233,18 +245,21 @@ export async function registerUser({
 }
 
 export async function loginUser({ email, password }) {
-  const userRow = await findUserByEmail(email);
+  let userRow = await findUserByEmail(email);
   if (!userRow) {
     console.warn('[AUTH] login rejected: no account for that email');
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
+  userRow = await clearExpiredLockout(userRow);
   assertAccountActive(userRow);
   assertNotLocked(userRow);
 
   const valid = await verifyPassword(password, userRow.password_hash);
   if (!valid) {
-    console.warn('[AUTH] login rejected: password mismatch');
+    console.warn(
+      `[AUTH] login rejected: password mismatch (len=${String(password ?? '').length})`
+    );
     await recordFailedLogin(userRow.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
@@ -265,18 +280,21 @@ export async function loginUser({ email, password }) {
 export async function sendPasswordLoginOtp({ email, password }) {
   console.log(`[AUTH] password-otp/send requested for ${normalizeEmail(email)}`);
 
-  const userRow = await findUserByEmail(email);
+  let userRow = await findUserByEmail(email);
   if (!userRow) {
     console.warn('[AUTH] password-otp/send rejected: no account for that email');
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
+  userRow = await clearExpiredLockout(userRow);
   assertAccountActive(userRow);
   assertNotLocked(userRow);
 
   const valid = await verifyPassword(password, userRow.password_hash);
   if (!valid) {
-    console.warn('[AUTH] password-otp/send rejected: password mismatch');
+    console.warn(
+      `[AUTH] password-otp/send rejected: password mismatch (len=${String(password ?? '').length})`
+    );
     await recordFailedLogin(userRow.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
@@ -336,23 +354,27 @@ export async function completePasswordLoginOtp({ email, password, code }) {
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
-  assertAccountActive(userRow);
-  assertNotLocked(userRow);
+  const unlocked = await clearExpiredLockout(userRow);
+  assertAccountActive(unlocked);
+  assertNotLocked(unlocked);
 
-  const validPassword = await verifyPassword(password, userRow.password_hash);
+  const validPassword = await verifyPassword(password, unlocked.password_hash);
   if (!validPassword) {
-    await recordFailedLogin(userRow.id);
+    console.warn(
+      `[AUTH] password-otp/verify rejected: password mismatch (len=${String(password ?? '').length})`
+    );
+    await recordFailedLogin(unlocked.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
   }
 
-  const contact = normalizeEmail(userRow.email);
+  const contact = normalizeEmail(unlocked.email);
   const purpose = 'login_gate';
 
   if (isDemoOtp(normalizedCode)) {
     await pool.query(
       `UPDATE otp_codes SET verified_at = NOW()
        WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
-      [userRow.id, purpose]
+      [unlocked.id, purpose]
     );
   } else {
     const { rows } = await pool.query(
@@ -366,7 +388,7 @@ export async function completePasswordLoginOtp({ email, password, code }) {
          AND oc.expires_at > NOW()
        ORDER BY oc.created_at DESC
        LIMIT 1`,
-      [userRow.id, contact, purpose]
+      [unlocked.id, contact, purpose]
     );
 
     const otpRow = rows[0];
@@ -385,11 +407,11 @@ export async function completePasswordLoginOtp({ email, password, code }) {
   // Login OTP proves email ownership — mark verified so Verify Account is not required again.
   await pool.query(
     `UPDATE users SET email_verified = TRUE WHERE id = $1`,
-    [userRow.id]
+    [unlocked.id]
   );
-  await clearFailedLogins(userRow.id);
-  const fresh = await findUserById(userRow.id);
-  return issueAuthSession(fresh || userRow);
+  await clearFailedLogins(unlocked.id);
+  const fresh = await findUserById(unlocked.id);
+  return issueAuthSession(fresh || unlocked);
 }
 
 export async function getUserProfile(userId) {

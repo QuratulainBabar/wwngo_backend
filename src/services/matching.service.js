@@ -6,6 +6,7 @@ import {
   destinationsMatch,
   placesMatch,
 } from '../utils/destination_match.js';
+import { tripCanCarryParcelWeight } from '../utils/luggage_capacity.js';
 import { mapTrip } from './trip.service.js';
 
 function formatDateOnly(value) {
@@ -86,7 +87,8 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
 }
 
 /**
- * Returns travelers whose trip To matches the delivery To.
+ * Returns travelers whose trip To matches the delivery To and whose luggage
+ * capacity is at least the delivery parcel weight.
  * City-to-city compares to_city labels; country-to-country compares country codes/names.
  *
  * Own trips are excluded so sender, traveler, and receiver stay on separate
@@ -110,9 +112,14 @@ export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
     limit: 100,
   });
 
+  const parcelWeightKg = delivery.weight_kg;
   const matched = [];
   for (const trip of candidates) {
     if (!destinationsMatch(delivery, trip)) continue;
+    // Hard filter: available luggage capacity must cover parcel weight.
+    if (!tripCanCarryParcelWeight(trip.luggage_capacity_kg, parcelWeightKg)) {
+      continue;
+    }
     const score = matchScore(delivery, trip);
     if (score <= 0) continue;
 

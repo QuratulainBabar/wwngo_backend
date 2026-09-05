@@ -8,6 +8,7 @@ import * as notificationCreateService from './notification_create.service.js';
 import { publish } from './notification_hub.js';
 import { mapTrip } from './trip.service.js';
 import { MAX_TRAVELER_REQUESTS_PER_DELIVERY } from '../utils/fees.js';
+import { assertTripCanCarryParcel } from '../utils/luggage_capacity.js';
 
 function formatDateOnly(value) {
   if (value == null) return null;
@@ -153,6 +154,8 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
   if (trip.traveler_id === senderId) {
     throw new AppError('You cannot request your own trip', 400, 'INVALID_TRAVELER');
   }
+
+  assertTripCanCarryParcel(trip.luggage_capacity_kg, delivery.weight_kg);
 
   const matchScore = Math.max(0, Math.min(100, Number(body.matchScore) || 0));
   const timerService = await import('./timer.service.js');

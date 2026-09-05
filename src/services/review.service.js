@@ -1,5 +1,6 @@
 import { pool } from '../db/pool.js';
 import * as reviewRepository from '../repositories/review.repository.js';
+import * as notificationCreateService from './notification_create.service.js';
 import { AppError } from '../utils/errors.js';
 import { normalizeRole } from '../repositories/wallet.repository.js';
 
@@ -36,12 +37,32 @@ function sameId(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
+/** Which party role a user holds on this delivery, or null if not a party. */
+function partyRoleOnDelivery(delivery, userId) {
+  if (sameId(delivery.sender_id, userId)) return 'sender';
+  if (sameId(delivery.traveler_id, userId)) return 'traveler';
+  if (sameId(delivery.receiver_id, userId)) return 'receiver';
+  return null;
+}
+
+function profileRouteForRole(role) {
+  switch (role) {
+    case 'traveler':
+      return '/traveler-profile';
+    case 'receiver':
+      return '/receiver-profile';
+    default:
+      return '/profile';
+  }
+}
+
 /**
  * Ensure the reviewer/reviewee pair is valid for this shipment and role.
- * Allowed:
- *   sender → traveler
- *   traveler → receiver
- *   receiver → traveler
+ * Allowed (any distinct party pair):
+ *   sender → traveler | receiver
+ *   traveler → sender | receiver
+ *   receiver → sender | traveler
+ * `role` is the reviewee's party role on the delivery.
  */
 async function assertValidReviewPair({
   reviewerId,
@@ -69,77 +90,50 @@ async function assertValidReviewPair({
     throw new AppError('Delivery not found', 404, 'NOT_FOUND');
   }
 
-  const isParty =
-    sameId(delivery.sender_id, reviewerId) ||
-    sameId(delivery.traveler_id, reviewerId) ||
-    sameId(delivery.receiver_id, reviewerId);
-  if (!isParty) {
+  const reviewerParty = partyRoleOnDelivery(delivery, reviewerId);
+  const revieweeParty = partyRoleOnDelivery(delivery, revieweeId);
+
+  if (!reviewerParty || !revieweeParty) {
     throw new AppError(
       'You can only review parties on your own deliveries',
       403,
       'FORBIDDEN'
     );
   }
-
-  if (role === 'traveler') {
-    if (!sameId(delivery.traveler_id, revieweeId)) {
-      throw new AppError(
-        'Reviewee must be the traveler for this delivery',
-        400,
-        'INVALID_REVIEWEE'
-      );
-    }
-    const allowed =
-      sameId(delivery.sender_id, reviewerId) ||
-      sameId(delivery.receiver_id, reviewerId);
-    if (!allowed) {
-      throw new AppError(
-        'Only the sender or receiver can review the traveler',
-        403,
-        'FORBIDDEN'
-      );
-    }
-    return delivery;
+  if (reviewerParty === revieweeParty) {
+    throw new AppError('You cannot review yourself', 400, 'VALIDATION_ERROR');
+  }
+  if (role !== revieweeParty) {
+    throw new AppError(
+      `Reviewee must be the ${role} for this delivery`,
+      400,
+      'INVALID_REVIEWEE'
+    );
   }
 
-  if (role === 'receiver') {
-    if (!sameId(delivery.receiver_id, revieweeId)) {
-      throw new AppError(
-        'Reviewee must be the receiver for this delivery',
-        400,
-        'INVALID_REVIEWEE'
-      );
-    }
-    if (!sameId(delivery.traveler_id, reviewerId)) {
-      throw new AppError(
-        'Only the traveler can review the receiver',
-        403,
-        'FORBIDDEN'
-      );
-    }
-    return delivery;
-  }
+  return delivery;
+}
 
-  if (role === 'sender') {
-    if (!sameId(delivery.sender_id, revieweeId)) {
-      throw new AppError(
-        'Reviewee must be the sender for this delivery',
-        400,
-        'INVALID_REVIEWEE'
-      );
-    }
-    // Keep traveler→sender allowed for backwards compatibility if used.
-    if (!sameId(delivery.traveler_id, reviewerId)) {
-      throw new AppError(
-        'Only the traveler can review the sender',
-        403,
-        'FORBIDDEN'
-      );
-    }
-    return delivery;
-  }
+async function notifyRevieweeOfReview({
+  revieweeId,
+  revieweeRole,
+  reviewerName,
+  rating,
+  shipmentPublicId,
+}) {
+  const stars = Number(rating) || 0;
+  const starLabel = `${stars}-star`;
+  const shipmentLabel = shipmentPublicId ? ` for ${shipmentPublicId}` : '';
+  const name = String(reviewerName || '').trim() || 'Someone';
 
-  throw new AppError('Invalid review role', 400, 'VALIDATION_ERROR');
+  await notificationCreateService.createNotification({
+    userId: revieweeId,
+    role: revieweeRole,
+    type: 'reviewReceived',
+    title: 'New review received',
+    body: `${name} left you a ${starLabel} review${shipmentLabel}.`,
+    route: profileRouteForRole(revieweeRole),
+  });
 }
 
 /**
@@ -178,7 +172,7 @@ export async function createReview(reviewerId, payload) {
     throw new AppError('Review text is required', 400, 'VALIDATION_ERROR');
   }
 
-  await assertValidReviewPair({
+  const delivery = await assertValidReviewPair({
     reviewerId,
     revieweeId,
     role,
@@ -194,7 +188,22 @@ export async function createReview(reviewerId, payload) {
       body: text,
       shipmentId,
     });
-    return mapReview(row);
+    const mapped = mapReview(row);
+
+    await notifyRevieweeOfReview({
+      revieweeId,
+      revieweeRole: role,
+      reviewerName: mapped.reviewerName,
+      rating: mapped.rating,
+      shipmentPublicId: delivery.public_id || shipmentId,
+    }).catch((err) => {
+      console.error(
+        '[reviews] notify reviewee failed:',
+        err?.message || err
+      );
+    });
+
+    return mapped;
   } catch (err) {
     if (err?.code === '23505') {
       throw new AppError(

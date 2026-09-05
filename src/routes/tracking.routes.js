@@ -39,7 +39,7 @@ router.post(
     const publicId = delivery.public_id;
     for (const [uid, role, route] of [
       [delivery.sender_id, 'sender', `/shipment/${publicId}`],
-      [delivery.receiver_id, 'receiver', `/receiver-tracking`],
+      [delivery.receiver_id, 'receiver', `/receiver-tracking?shipmentId=${publicId}`],
     ]) {
       if (!uid) continue;
       await notificationCreateService

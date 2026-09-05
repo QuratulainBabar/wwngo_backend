@@ -97,17 +97,18 @@ function messageStatus(row) {
 
 function peerId(conversation, userId) {
   if (!conversation) return null;
-  return conversation.participant_a_id === userId
-    ? conversation.participant_b_id
-    : conversation.participant_a_id;
+  const uid = String(userId);
+  const a = String(conversation.participant_a_id);
+  const b = String(conversation.participant_b_id);
+  return a === uid ? b : a;
 }
 
 function emitReceipts({ conversationId, peerUserId, status, messageIds }) {
   if (!messageIds?.length) return;
   const payload = {
-    conversationId,
+    conversationId: String(conversationId),
     status,
-    messageIds,
+    messageIds: messageIds.map((id) => String(id)),
     at: new Date().toISOString(),
   };
   emitToConversation(conversationId, 'message_receipts', payload);
@@ -118,11 +119,11 @@ function mapMessage(row, currentUserId) {
   const isImage = Boolean(row.is_image) || Boolean(row.image_name);
   const imageUrl = isImage ? publicImageUrl(row.image_name) : null;
   return {
-    id: row.id,
-    conversationId: row.conversation_id,
-    senderId: row.sender_id,
+    id: String(row.id),
+    conversationId: String(row.conversation_id),
+    senderId: String(row.sender_id),
     text: row.body,
-    isMine: row.sender_id === currentUserId,
+    isMine: String(row.sender_id) === String(currentUserId),
     time: formatMessageTime(row.created_at),
     isImage,
     imageName: row.image_name,
@@ -218,11 +219,24 @@ export async function sendMessage(userId, conversationId, body) {
   // itself — otherwise the recipient would render incoming messages as its own.
   const payload = {
     ...mapped,
-    senderId: message.sender_id,
-    conversationId,
+    id: String(message.id),
+    senderId: String(message.sender_id),
+    conversationId: String(conversationId),
+    isMine: false,
   };
   emitToConversation(conversationId, 'chat_message', payload);
   if (recipientId) emitToUser(recipientId, 'chat_message', payload);
+
+  // Fan out the initial receipt to the sender's user room so ticks update live
+  // even if the HTTP response is slow or the open chat missed the status field.
+  if (mapped.status === 'delivered' || mapped.status === 'read') {
+    emitToUser(userId, 'message_receipts', {
+      conversationId: String(conversationId),
+      status: mapped.status,
+      messageIds: [String(message.id)],
+      at: new Date().toISOString(),
+    });
+  }
 
   // Push the message to the peer when they aren't already watching the thread.
   // Fire-and-forget: chat delivery must not depend on FCM.
@@ -245,10 +259,10 @@ export async function sendMessage(userId, conversationId, body) {
  */
 async function notifyChatRecipient({ conversation, senderId, text, isImage }) {
   const recipientId =
-    conversation.participant_a_id === senderId
+    String(conversation.participant_a_id) === String(senderId)
       ? conversation.participant_b_id
       : conversation.participant_a_id;
-  if (!recipientId || recipientId === senderId) return;
+  if (!recipientId || String(recipientId) === String(senderId)) return;
 
   // Don't double-notify someone already reading the thread.
   if (await isUserInConversation(recipientId, conversation.id)) return;
@@ -323,18 +337,18 @@ export async function onUserCameOnline(userId) {
   }
 
   for (const [conversationId, group] of byConversation) {
-    const payload = {
-      conversationId,
+    const messageIds = group.messageIds.map((id) => String(id));
+    emitReceipts({
+      conversationId: String(conversationId),
       peerUserId: null,
       status: 'delivered',
-      messageIds: group.messageIds,
-    };
-    emitReceipts(payload);
+      messageIds,
+    });
     for (const senderId of group.senderIds) {
       emitToUser(senderId, 'message_receipts', {
-        conversationId,
+        conversationId: String(conversationId),
         status: 'delivered',
-        messageIds: group.messageIds,
+        messageIds,
         at: new Date().toISOString(),
       });
     }
@@ -363,16 +377,19 @@ export async function onConversationOpened(userId, conversationId) {
 
 /**
  * Recipient device ACKed a specific message (reached the device).
+ * Always fan out a receipt so the sender's open chat can catch up even when
+ * delivered_at was already set at insert time (peer was online).
  */
 export async function onMessageDeliveredAck(userId, messageId) {
   if (!userId || !messageId) return;
   const updated = await chatRepository.markMessageDelivered(messageId, userId);
   if (!updated) return;
 
+  const status = updated.read_at ? 'read' : 'delivered';
   emitReceipts({
     conversationId: updated.conversation_id,
     peerUserId: updated.sender_id,
-    status: 'delivered',
+    status,
     messageIds: [updated.id],
   });
 }

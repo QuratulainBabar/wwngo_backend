@@ -91,6 +91,7 @@ const REQUEST_SELECT = `
           t.origin_country AS trip_origin_country,
           t.destination_country AS trip_destination_country,
           t.travel_date AS trip_travel_date,
+          t.luggage_capacity_kg AS trip_luggage_capacity_kg,
           u.name AS sender_name,
           u.email AS sender_email,
           u.rating AS sender_rating
