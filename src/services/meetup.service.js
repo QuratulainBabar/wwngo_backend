@@ -58,6 +58,16 @@ export async function proposeMeetup(deliveryIdOrPublic, userId, { location }) {
   if (!label) throw new AppError('Meetup location is required', 400, 'VALIDATION_ERROR');
 
   const delivery = await getDeliveryAndAssertParticipant(deliveryId, userId);
+
+  // Once the traveler has accepted the proposed meetup, lock further changes.
+  if (Boolean(delivery.meetup_agreed_by_traveler)) {
+    throw new AppError(
+      'Meetup location already accepted by traveler and can no longer be changed',
+      400,
+      'MEETUP_ALREADY_ACCEPTED'
+    );
+  }
+
   const isSender = delivery.participantRole === 'sender';
 
   await pool.query(
