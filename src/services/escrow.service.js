@@ -25,9 +25,13 @@ function platformFeeRoute(role, shipmentId) {
     return id ? `/shipment/${id}?traveler=true` : '/traveler-deliveries';
   }
   if (role === 'receiver') {
-    return id ? `/receiver-parcel/${id}` : '/receiver-home';
+    // Must match Flutter GoRoute `/receiver-tracking?shipmentId=…`
+    return id
+      ? `/receiver-tracking?shipmentId=${encodeURIComponent(id)}`
+      : '/receiver-home';
   }
-  return id ? `/track/${id}` : '/wallet?role=sender';
+  // Sender Track screen is `/shipment/:id` (not `/track/:id`).
+  return id ? `/shipment/${id}` : '/track';
 }
 
 /**

@@ -986,7 +986,7 @@ export async function submitReceiverPayment(
     type: 'deliveryStatus',
     title: 'Receiver paid fee share',
     body: `Receiver paid their platform fee for ${mapped.publicId}.`,
-    route: `/track/${mapped.publicId}`,
+    route: `/shipment/${mapped.publicId}`,
   }).catch(() => {});
 
   return mapped;
