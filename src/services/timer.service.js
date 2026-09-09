@@ -79,7 +79,7 @@ export async function processExpiredTimers() {
      WHERE r.status = 'pending'
        AND r.accept_due_at IS NOT NULL
        AND r.accept_due_at < NOW()
-       AND d.status NOT IN ('cancelled', 'delivered')`
+       AND d.status IN ('posted', 'waiting_receiver')`
   );
 
   for (const r of overdueTraveler) {

@@ -519,6 +519,20 @@ async function onCounterOfferAccepted(mapped, rawRow, options = {}) {
     },
   });
 
+  await requestRepository
+    .finalizeRequestsForBookedDelivery({
+      deliveryId,
+      winningRequestId: mapped.requestId || rawRow.sender_request_id || null,
+      tripId,
+      travelerId,
+    })
+    .catch((err) => {
+      console.error(
+        '[counter-offer] finalize sender requests after accept failed:',
+        err?.message || err
+      );
+    });
+
   if (senderId && travelerId) {
     await chatRepository.ensureConversation({
       deliveryId,

@@ -240,22 +240,22 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
       [
         delivery.sender_id,
         'sender',
-        'Parcel collected',
-        `Your parcel ${publicId} was handed to the traveler.`,
+        'NFC verification successful',
+        `NFC match confirmed for Trip/Delivery ${publicId}. You and the Traveler verified the same delivery — the Traveler is connected to the correct Sender for this parcel. Status is now Collected.`,
         `/shipment/${publicId}`,
       ],
       [
         delivery.traveler_id,
         'traveler',
-        'Parcel collected',
-        `You received parcel ${publicId}. Mark in transit when you begin travel.`,
+        'NFC verification successful',
+        `NFC match confirmed for Trip/Delivery ${publicId}. You and the Sender verified the same delivery — you are connected to the correct Sender for this parcel. Status is now Collected. Mark in transit when you begin travel.`,
         `/shipment/${publicId}?traveler=true`,
       ],
       [
         delivery.receiver_id,
         'receiver',
         'Parcel collected',
-        `Your parcel ${publicId} has been collected by the traveler.`,
+        `Your parcel ${publicId} has been collected by the traveler after successful NFC handoff.`,
         `/receiver-tracking`,
       ],
     ]) {
@@ -302,9 +302,9 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
           userId: delivery.traveler_id,
           role: 'traveler',
           type: 'deliveryStatus',
-          title: 'Leave a review',
-          body: `Parcel ${publicId} was delivered. Rate your experience with the receiver.`,
-          route: `/delivery-review?shipmentId=${encodeURIComponent(publicId)}&role=traveler`,
+          title: 'NFC verification successful',
+          body: `NFC match confirmed for Trip/Delivery ${publicId}. You and the Receiver verified the same delivery — you are handing over the parcel to the correct Receiver for this exact trip/delivery. Status is now Delivered. Escrow released.`,
+          route: `/shipment/${publicId}?traveler=true`,
         })
         .catch(() => {});
     }
@@ -315,8 +315,8 @@ async function applyCheckpointEffects(delivery, checkpoint, userId) {
           userId: delivery.receiver_id,
           role: 'receiver',
           type: 'deliveryStatus',
-          title: 'Delivery complete',
-          body: `Parcel ${publicId} was delivered successfully. You can leave a review for the traveler.`,
+          title: 'NFC verification successful',
+          body: `NFC match confirmed for Trip/Delivery ${publicId}. You and the Traveler verified the same delivery — the Traveler is handing over the parcel to you (the correct Receiver) for this exact trip/delivery. Status is now Delivered. You can leave a review.`,
           route: `/delivery-review?shipmentId=${encodeURIComponent(publicId)}&role=receiver`,
         })
         .catch(() => {});

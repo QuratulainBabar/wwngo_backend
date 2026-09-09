@@ -55,6 +55,9 @@ export async function createSenderRequest({
   return rows[0];
 }
 
+/** Deliveries still open for traveler matching (not yet booked). */
+const OPEN_MATCHING_DELIVERY_SQL = `d.status IN ('posted', 'waiting_receiver')`;
+
 const REQUEST_SELECT = `
   SELECT r.*,
           d.public_id AS delivery_public_id,
@@ -108,7 +111,7 @@ export async function listPendingRequestsForTraveler(travelerId, { limit = 50 } 
      INNER JOIN users u ON u.id = r.sender_id
      WHERE r.traveler_id = $1
        AND r.status = 'pending'
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
        AND t.status = 'open_bid'
      ORDER BY r.created_at DESC
      LIMIT $2`,
@@ -125,7 +128,7 @@ export async function countPendingRequestsForTraveler(travelerId) {
      INNER JOIN trips t ON t.id = r.trip_id
      WHERE r.traveler_id = $1
        AND r.status = 'pending'
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
        AND t.status = 'open_bid'`,
     [travelerId]
   );
@@ -175,7 +178,7 @@ export async function countUnreadRequestsForTraveler(travelerId) {
      WHERE r.traveler_id = $1
        AND r.status = 'pending'
        AND r.read_at IS NULL
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
        AND t.status = 'open_bid'`,
     [travelerId]
   );
@@ -193,7 +196,7 @@ export async function markRequestsReadForTrip(tripId, travelerId) {
        AND r.status = 'pending'
        AND r.read_at IS NULL
        AND d.id = r.delivery_id
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
      RETURNING r.id`,
     [tripId, travelerId]
   );
@@ -210,7 +213,7 @@ export async function listPendingRequestsForTrip(tripId, travelerId) {
      WHERE r.trip_id = $1
        AND r.traveler_id = $2
        AND r.status = 'pending'
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
      ORDER BY r.created_at DESC`,
     [tripId, travelerId]
   );
@@ -227,7 +230,7 @@ export async function findPendingRequestForTraveler(requestId, travelerId) {
      WHERE r.id = $1
        AND r.traveler_id = $2
        AND r.status = 'pending'
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
      LIMIT 1`,
     [requestId, travelerId]
   );
@@ -255,7 +258,7 @@ export async function countPendingRequestsForTrip(tripId) {
      INNER JOIN deliveries d ON d.id = r.delivery_id
      WHERE r.trip_id = $1
        AND r.status = 'pending'
-       AND d.status NOT IN ('cancelled', 'delivered')`,
+       AND ${OPEN_MATCHING_DELIVERY_SQL}`,
     [tripId]
   );
   return Number(rows[0]?.count) || 0;
@@ -272,7 +275,7 @@ export async function respondToSenderRequest(requestId, travelerId, status) {
        AND r.traveler_id = $2
        AND r.status = 'pending'
        AND d.id = r.delivery_id
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
      RETURNING r.*`,
     [requestId, travelerId, status]
   );
@@ -291,10 +294,55 @@ export async function listTripsWithPendingRequestsForTraveler(travelerId) {
      INNER JOIN deliveries d ON d.id = r.delivery_id
      WHERE t.traveler_id = $1
        AND t.status = 'open_bid'
-       AND d.status NOT IN ('cancelled', 'delivered')
+       AND ${OPEN_MATCHING_DELIVERY_SQL}
      GROUP BY t.id
      ORDER BY MAX(r.created_at) DESC`,
     [travelerId]
   );
   return rows;
+}
+
+/**
+ * After a sender books a traveler, mark the winning request accepted and
+ * cancel any other active requests for that delivery.
+ */
+export async function finalizeRequestsForBookedDelivery({
+  deliveryId,
+  winningRequestId = null,
+  tripId = null,
+  travelerId = null,
+} = {}, client) {
+  if (!deliveryId) return;
+
+  const isWinner = `(
+    ($2::uuid IS NOT NULL AND id = $2)
+    OR (
+      $3::uuid IS NOT NULL
+      AND $4::uuid IS NOT NULL
+      AND trip_id = $3
+      AND traveler_id = $4
+    )
+  )`;
+  const params = [deliveryId, winningRequestId, tripId, travelerId];
+
+  await db(client).query(
+    `UPDATE trip_sender_requests
+     SET status = 'accepted',
+         responded_at = COALESCE(responded_at, NOW()),
+         updated_at = NOW()
+     WHERE delivery_id = $1
+       AND status IN ('pending', 'accepted')
+       AND ${isWinner}`,
+    params
+  );
+
+  await db(client).query(
+    `UPDATE trip_sender_requests
+     SET status = 'cancelled',
+         updated_at = NOW()
+     WHERE delivery_id = $1
+       AND status IN ('pending', 'accepted')
+       AND NOT ${isWinner}`,
+    params
+  );
 }

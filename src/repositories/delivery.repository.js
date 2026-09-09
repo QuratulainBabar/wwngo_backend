@@ -164,12 +164,31 @@ export async function listDeliveriesForTraveler(travelerId, { limit = 50, offset
     `SELECT d.*,
             s.name AS sender_name,
             t.name AS traveler_name,
-            r.name AS receiver_name
+            r.name AS receiver_name,
+            COALESCE(tr.public_id, req_tr.public_id) AS trip_public_id
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
      LEFT JOIN users r ON r.id = d.receiver_id
+     LEFT JOIN trips tr ON tr.id = d.trip_id
+     LEFT JOIN LATERAL (
+       SELECT tsr.trip_id
+       FROM trip_sender_requests tsr
+       WHERE tsr.delivery_id = d.id
+         AND tsr.traveler_id = $1
+         AND tsr.status IN ('pending', 'accepted')
+       ORDER BY tsr.updated_at DESC NULLS LAST, tsr.created_at DESC
+       LIMIT 1
+     ) req ON true
+     LEFT JOIN trips req_tr ON req_tr.id = req.trip_id
      WHERE d.traveler_id = $1
+        OR EXISTS (
+          SELECT 1
+          FROM trip_sender_requests tsr
+          WHERE tsr.delivery_id = d.id
+            AND tsr.traveler_id = $1
+            AND tsr.status IN ('pending', 'accepted')
+        )
      ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
      LIMIT $2 OFFSET $3`,
     [travelerId, limit, offset]
@@ -214,8 +233,9 @@ export async function findDeliveryByPublicIdForTraveler(publicId, travelerId) {
 }
 
 /**
- * Resolve a traveler trip public id (TR-…) to the linked assigned delivery.
- * Used when My Trips / Home open the shipment detail screen with a trip id.
+ * Resolve a traveler trip public id (TR-…) to the linked delivery.
+ * Prefers an assigned booking (deliveries.trip_id), then a sender request
+ * on that trip (pending/accepted) so My Trips → View can open WW tracking.
  */
 export async function findDeliveryByTripPublicIdForTraveler(
   tripPublicId,
@@ -233,10 +253,62 @@ export async function findDeliveryByTripPublicIdForTraveler(
      LEFT JOIN users t ON t.id = d.traveler_id
      LEFT JOIN users r ON r.id = d.receiver_id
      WHERE tr.public_id = $1
-       AND d.traveler_id = $2
+       AND tr.traveler_id = $2
+       AND (d.traveler_id = $2 OR d.traveler_id IS NULL)
      ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
      LIMIT 1`,
     [tripPublicId, travelerId]
+  );
+  if (rows[0]) return rows[0];
+
+  const { rows: requestRows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name,
+            r.name AS receiver_name,
+            tr.public_id AS trip_public_id
+     FROM trip_sender_requests tsr
+     INNER JOIN trips tr ON tr.id = tsr.trip_id
+     INNER JOIN deliveries d ON d.id = tsr.delivery_id
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
+     WHERE tr.public_id = $1
+       AND tsr.traveler_id = $2
+       AND tsr.status IN ('pending', 'accepted')
+     ORDER BY tsr.updated_at DESC NULLS LAST, tsr.created_at DESC
+     LIMIT 1`,
+    [tripPublicId, travelerId]
+  );
+  return requestRows[0] || null;
+}
+
+/**
+ * Allow traveler to open a WW delivery that is linked via a sender request on
+ * one of their trips, even before deliveries.traveler_id is assigned.
+ */
+export async function findDeliveryByPublicIdForTravelerRequest(
+  publicId,
+  travelerId
+) {
+  const { rows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name,
+            r.name AS receiver_name,
+            tr.public_id AS trip_public_id
+     FROM deliveries d
+     INNER JOIN trip_sender_requests tsr ON tsr.delivery_id = d.id
+     INNER JOIN trips tr ON tr.id = tsr.trip_id
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
+     WHERE d.public_id = $1
+       AND tsr.traveler_id = $2
+       AND tsr.status IN ('pending', 'accepted')
+     ORDER BY tsr.updated_at DESC NULLS LAST, tsr.created_at DESC
+     LIMIT 1`,
+    [publicId, travelerId]
   );
   return rows[0] || null;
 }

@@ -76,6 +76,7 @@ export function mapTrip(row) {
     travelerReviewCount:
       row.traveler_review_count != null ? Number(row.traveler_review_count) : null,
     travelerBio: row.traveler_bio || null,
+    linkedDeliveryPublicId: row.linked_delivery_public_id || null,
     tripType: row.trip_type,
     status: row.status,
     fromCity: row.from_city,

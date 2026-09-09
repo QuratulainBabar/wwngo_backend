@@ -140,7 +140,9 @@ export async function findOfferByRequestId(senderRequestId, travelerId) {
  * @param {string} travelerId
  * @param {{ limit?: number, filter?: 'counter' | 'acceptance' }} [options]
  *   - counter (default): real traveler counter-offers (`is_acceptance = FALSE`)
- *   - acceptance: traveler accepted sender's exact max budget (`is_acceptance = TRUE`)
+ *     that the sender has not accepted yet (accepted rows leave this list)
+ *   - acceptance: traveler accepted sender's exact max budget (`is_acceptance = TRUE`),
+ *     still pending sender decision only (accepted/rejected/delivered are excluded)
  */
 export async function listOffersForTraveler(
   travelerId,
@@ -155,6 +157,11 @@ export async function listOffersForTraveler(
      INNER JOIN users u ON u.id = o.sender_id
      WHERE o.traveler_id = $1
        AND o.is_acceptance = $3
+       AND o.status <> 'accepted'
+       AND (
+         $3 = FALSE
+         OR o.status IN ('pending', 'updated')
+       )
      ORDER BY o.updated_at DESC, o.created_at DESC
      LIMIT $2`,
     [travelerId, limit, acceptanceOnly]

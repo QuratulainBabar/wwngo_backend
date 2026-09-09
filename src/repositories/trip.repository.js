@@ -39,12 +39,36 @@ export async function createTrip(trip) {
   return rows[0];
 }
 
+/** Latest WW-… delivery public id linked to a trip (assigned or sender request). */
+const LINKED_DELIVERY_PUBLIC_ID_SQL = `
+  COALESCE(
+    (
+      SELECT d.public_id
+      FROM deliveries d
+      WHERE d.trip_id = t.id
+        AND (d.traveler_id = t.traveler_id OR d.traveler_id IS NULL)
+      ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
+      LIMIT 1
+    ),
+    (
+      SELECT d.public_id
+      FROM trip_sender_requests tsr
+      INNER JOIN deliveries d ON d.id = tsr.delivery_id
+      WHERE tsr.trip_id = t.id
+        AND tsr.traveler_id = t.traveler_id
+        AND tsr.status IN ('pending', 'accepted')
+      ORDER BY tsr.updated_at DESC NULLS LAST, tsr.created_at DESC
+      LIMIT 1
+    )
+  ) AS linked_delivery_public_id`;
+
 export async function listTripsForTraveler(travelerId, { limit = 50, offset = 0 } = {}) {
   const { rows } = await pool.query(
     `SELECT t.*,
             u.name AS traveler_name,
             u.rating AS traveler_rating,
-            u.review_count AS traveler_review_count
+            u.review_count AS traveler_review_count,
+            ${LINKED_DELIVERY_PUBLIC_ID_SQL}
      FROM trips t
      LEFT JOIN users u ON u.id = t.traveler_id
      WHERE t.traveler_id = $1
@@ -75,7 +99,8 @@ export async function findTripByIdForTraveler(tripId, travelerId) {
     `SELECT t.*,
             u.name AS traveler_name,
             u.rating AS traveler_rating,
-            u.review_count AS traveler_review_count
+            u.review_count AS traveler_review_count,
+            ${LINKED_DELIVERY_PUBLIC_ID_SQL}
      FROM trips t
      LEFT JOIN users u ON u.id = t.traveler_id
      WHERE t.id = $1 AND t.traveler_id = $2`,
@@ -89,7 +114,8 @@ export async function findTripByPublicIdForTraveler(publicId, travelerId) {
     `SELECT t.*,
             u.name AS traveler_name,
             u.rating AS traveler_rating,
-            u.review_count AS traveler_review_count
+            u.review_count AS traveler_review_count,
+            ${LINKED_DELIVERY_PUBLIC_ID_SQL}
      FROM trips t
      LEFT JOIN users u ON u.id = t.traveler_id
      WHERE t.public_id = $1 AND t.traveler_id = $2`,

@@ -17,6 +17,8 @@ import {
   receiverPlatformFeeCents,
 } from '../utils/fees.js';
 import { labelsInSameArea } from '../utils/meetup_location_match.js';
+import { placesMatch } from '../utils/destination_match.js';
+import * as tripRepository from '../repositories/trip.repository.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const UPLOADS_ROOT = path.join(__dirname, '../../uploads');
@@ -703,6 +705,108 @@ export async function listTravelerDeliveries(travelerId, query = {}) {
   return rows.map((row) => mapDelivery(row, byDelivery.get(row.id) || []));
 }
 
+function iataCode(...values) {
+  const pattern = /\(([A-Z]{3})\)/;
+  for (const value of values) {
+    const match = String(value ?? '').trim().match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function endpointMatches(tripValues, deliveryValues) {
+  const tripIata = iataCode(...tripValues);
+  const deliveryIata = iataCode(...deliveryValues);
+  if (tripIata && deliveryIata) return tripIata === deliveryIata;
+  for (const tripValue of tripValues) {
+    for (const deliveryValue of deliveryValues) {
+      if (placesMatch(tripValue, deliveryValue)) return true;
+    }
+  }
+  return false;
+}
+
+function tripRouteMatchesDelivery(trip, delivery) {
+  const fromMatch = endpointMatches(
+    [trip.origin_airport, trip.from_city],
+    [delivery.origin_airport, delivery.from_city]
+  );
+  const toMatch = endpointMatches(
+    [trip.destination_airport, trip.to_city],
+    [delivery.destination_airport, delivery.to_city]
+  );
+  return fromMatch && toMatch;
+}
+
+function deliveryLinkedToTrip(trip, delivery) {
+  const tripKeys = [trip.public_id, trip.id]
+    .map((value) => String(value ?? '').trim().toLowerCase())
+    .filter(Boolean);
+  const deliveryTrip = String(delivery.trip_public_id || '').trim().toLowerCase();
+  const deliveryTripId = String(delivery.trip_id || '').trim().toLowerCase();
+  return tripKeys.some((key) => key === deliveryTrip || key === deliveryTripId);
+}
+
+function dateOnly(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value.slice(0, 10);
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Match a traveler's WW delivery on the same From/To corridor as [trip]. */
+async function findDeliveryMatchingTripRoute(trip, travelerId) {
+  const rows = await deliveryRepository.listDeliveriesForTraveler(travelerId, {
+    limit: 100,
+    offset: 0,
+  });
+  const tripDate = dateOnly(trip.travel_date);
+  let best = null;
+  let bestScore = -1;
+  for (const row of rows) {
+    const linked = deliveryLinkedToTrip(trip, row);
+    const otherTrip = String(row.trip_public_id || row.trip_id || '').trim();
+    if (!linked && otherTrip) continue;
+    if (!linked && !tripRouteMatchesDelivery(trip, row)) continue;
+    let score = linked ? 1000 : 1;
+    if (tripDate && dateOnly(row.travel_date) === tripDate) score += 50;
+    if (score > bestScore) {
+      bestScore = score;
+      best = row;
+    }
+  }
+  return best;
+}
+
+async function resolveDeliveryForTravelerTrip(trip, travelerId) {
+  if (!trip) return null;
+  if (trip.public_id) {
+    const byTrip = await deliveryRepository.findDeliveryByTripPublicIdForTraveler(
+      trip.public_id,
+      travelerId
+    );
+    if (byTrip) return byTrip;
+  }
+  const linkedPublicId = String(trip.linked_delivery_public_id || '').trim();
+  if (linkedPublicId && !/^TR-/i.test(linkedPublicId)) {
+    const byLinked =
+      (await deliveryRepository.findDeliveryByPublicIdForTraveler(
+        linkedPublicId,
+        travelerId
+      )) ||
+      (await deliveryRepository.findDeliveryByPublicIdForTravelerRequest(
+        linkedPublicId,
+        travelerId
+      ));
+    if (byLinked) return byLinked;
+  }
+  return findDeliveryMatchingTripRoute(trip, travelerId);
+}
+
 export async function getDeliveryForTraveler(travelerId, idOrPublicId) {
   const id = String(idOrPublicId || '').trim();
   const looksLikeUuid =
@@ -714,9 +818,25 @@ export async function getDeliveryForTraveler(travelerId, idOrPublicId) {
     ? await deliveryRepository.findDeliveryByIdForTraveler(id, travelerId)
     : await deliveryRepository.findDeliveryByPublicIdForTraveler(id, travelerId);
 
-  // My Trips / Home pass trip public ids (TR-…); resolve to the linked delivery.
+  // Home / My Trips pass trip ids (TR-… or trip UUID); resolve to the linked WW delivery.
   if (!row && /^TR-/i.test(id)) {
-    row = await deliveryRepository.findDeliveryByTripPublicIdForTraveler(
+    row = await resolveDeliveryForTravelerTrip(
+      await tripRepository.findTripByPublicIdForTraveler(id, travelerId),
+      travelerId
+    );
+  }
+
+  if (!row && looksLikeUuid) {
+    row = await resolveDeliveryForTravelerTrip(
+      await tripRepository.findTripByIdForTraveler(id, travelerId),
+      travelerId
+    );
+  }
+
+  // Pending/accepted sender request on this traveler's trip (traveler_id may
+  // not be assigned on the delivery yet).
+  if (!row && !/^TR-/i.test(id)) {
+    row = await deliveryRepository.findDeliveryByPublicIdForTravelerRequest(
       id,
       travelerId
     );
