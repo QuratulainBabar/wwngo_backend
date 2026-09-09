@@ -303,35 +303,68 @@ export async function listOpenTripsForDestinationMatch({
      FROM trips t
      INNER JOIN users u ON u.id = t.traveler_id
      WHERE t.status = 'open_bid'
-       AND t.trip_type = $1
        AND ($2::uuid IS NULL OR t.traveler_id <> $2::uuid)
        AND (
          (
-           $1 = 'city_to_city'
-           AND $4 <> ''
+           -- Same posting type + destination label/code (legacy path).
+           t.trip_type = $1
            AND (
-             LOWER(COALESCE(t.to_city, '')) = $4
-             OR LOWER(COALESCE(t.to_city, '')) = $5
-             OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $4 || '%'
-             OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $5 || '%'
-             OR $4 LIKE '%' || LOWER(COALESCE(t.to_city, '')) || '%'
-             OR $5 LIKE '%' || LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) || '%'
-             OR LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) = $5
+             (
+               $1 = 'city_to_city'
+               AND $4 <> ''
+               AND (
+                 LOWER(COALESCE(t.to_city, '')) = $4
+                 OR LOWER(COALESCE(t.to_city, '')) = $5
+                 OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $4 || '%'
+                 OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $5 || '%'
+                 OR $4 LIKE '%' || LOWER(COALESCE(t.to_city, '')) || '%'
+                 OR $5 LIKE '%' || LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) || '%'
+                 OR LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) = $5
+               )
+             )
+             OR (
+               $1 = 'country_to_country'
+               AND (
+                 (
+                   $3 <> ''
+                   AND UPPER(COALESCE(t.destination_country_code, t.to_code, '')) = $3
+                 )
+                 OR (
+                   $4 <> ''
+                   AND (
+                     LOWER(COALESCE(t.destination_country, '')) = $4
+                     OR LOWER(COALESCE(t.destination_country, '')) LIKE '%' || $4 || '%'
+                     OR $4 LIKE '%' || LOWER(COALESCE(t.destination_country, '')) || '%'
+                   )
+                 )
+               )
+             )
            )
          )
          OR (
+           -- Country parcel: also consider city trips that end in that country.
            $1 = 'country_to_country'
+           AND t.trip_type = 'city_to_city'
            AND (
-             (
-               $3 <> ''
-               AND UPPER(COALESCE(t.destination_country_code, '')) = $3
+             ($3 <> '' AND UPPER(COALESCE(t.to_code, '')) = $3)
+             OR (
+               $4 <> ''
+               AND LOWER(COALESCE(t.to_city, '')) LIKE '%' || $4 || '%'
              )
+           )
+         )
+         OR (
+           -- City parcel: also consider country trips to that destination country.
+           $1 = 'city_to_city'
+           AND t.trip_type = 'country_to_country'
+           AND (
+             ($3 <> '' AND UPPER(COALESCE(t.destination_country_code, t.to_code, '')) = $3)
              OR (
                $4 <> ''
                AND (
                  LOWER(COALESCE(t.destination_country, '')) = $4
                  OR LOWER(COALESCE(t.destination_country, '')) LIKE '%' || $4 || '%'
-                 OR $4 LIKE '%' || LOWER(COALESCE(t.destination_country, '')) || '%'
+                 OR LOWER(COALESCE(t.destination_airport, '')) LIKE '%' || $5 || '%'
                )
              )
            )

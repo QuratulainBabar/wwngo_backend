@@ -21,11 +21,30 @@ function formatDateOnly(value) {
   return `${y}-${m}-${day}`;
 }
 
-function deliveryRoute(row) {
+/** Prefer the map/airport place the sender selected over bare country names. */
+function routeEndpoints(row) {
   if (row.delivery_type === 'country_to_country') {
-    return `${row.origin_country || '—'} → ${row.destination_country || '—'}`;
+    const from =
+      String(row.origin_airport || '').trim() ||
+      String(row.from_city || '').trim() ||
+      String(row.origin_country || '').trim() ||
+      '';
+    const to =
+      String(row.destination_airport || '').trim() ||
+      String(row.to_city || '').trim() ||
+      String(row.destination_country || '').trim() ||
+      '';
+    return { from, to };
   }
-  return `${row.from_city || '—'} → ${row.to_city || '—'}`;
+  return {
+    from: String(row.from_city || '').trim(),
+    to: String(row.to_city || '').trim(),
+  };
+}
+
+function deliveryRoute(row) {
+  const { from, to } = routeEndpoints(row);
+  return `${from || '—'} → ${to || '—'}`;
 }
 
 function photoPublicUrl(filePath) {
@@ -67,6 +86,7 @@ function mapSenderRequest(row) {
     ? row.preferred_meetup_locations.filter(Boolean)
     : [];
   const photos = mapDeliveryPhotos(row.photos);
+  const endpoints = routeEndpoints(row);
   return {
     id: row.id,
     status: row.status,
@@ -76,10 +96,12 @@ function mapSenderRequest(row) {
     deliveryPublicId: row.delivery_public_id,
     deliveryType: row.delivery_type,
     route: deliveryRoute(row),
-    fromCity: row.from_city,
-    toCity: row.to_city,
+    fromCity: endpoints.from,
+    toCity: endpoints.to,
     originCountry: row.origin_country,
     destinationCountry: row.destination_country,
+    originAirport: row.origin_airport || null,
+    destinationAirport: row.destination_airport || null,
     travelDate: formatDateOnly(row.delivery_travel_date),
     parcelCategory: row.parcel_category,
     parcelSize: row.parcel_size || '',
@@ -87,6 +109,7 @@ function mapSenderRequest(row) {
     maxBudget: Number(row.max_budget) || 0,
     description: row.delivery_description || '',
     meetupLocations: meetup,
+    receiverMeetupLocation: row.receiver_meetup_location || null,
     photoCount: photos.length || Number(row.photo_count) || 0,
     photos,
     tripId: row.trip_id,
@@ -242,10 +265,7 @@ export async function requestTravelerForDelivery(senderId, deliveryIdOrPublicId,
 
   const mappedTrip = mapTrip(trip);
   const deliveryPublicId = delivery.public_id;
-  const route =
-    delivery.delivery_type === 'country_to_country'
-      ? `${delivery.origin_country} → ${delivery.destination_country}`
-      : `${delivery.from_city} → ${delivery.to_city}`;
+  const route = deliveryRoute(delivery);
 
   await notificationCreateService
     .createNotification({
@@ -363,18 +383,27 @@ export async function markSenderRequestsReadForTrip(travelerId, tripIdOrPublicId
   return { markedCount, unreadCount, notificationsUnread };
 }
 
-export async function acceptSenderRequest(travelerId, requestId) {
+export async function acceptSenderRequest(travelerId, requestId, body = {}) {
   const request = await requestRepository.findPendingRequestForTraveler(
     requestId,
     travelerId
   );
   if (!request) throw new AppError('Sender request not found', 404, 'NOT_FOUND');
 
-  const counterOfferService = await import('./trip_counter_offer.service.js');
-  return counterOfferService.createOrUpdateCounterOffer(travelerId, requestId, {
+  const payload = {
     amount: Number(request.max_budget),
     acceptedOffer: true,
-  });
+  };
+  if (Object.prototype.hasOwnProperty.call(body || {}, 'message')) {
+    payload.message = body.message;
+  }
+
+  const counterOfferService = await import('./trip_counter_offer.service.js');
+  return counterOfferService.createOrUpdateCounterOffer(
+    travelerId,
+    requestId,
+    payload
+  );
 }
 
 export async function declineSenderRequest(travelerId, requestId) {

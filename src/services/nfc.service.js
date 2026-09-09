@@ -185,11 +185,13 @@ async function getDeliveryForCheckpoint(deliveryId, userId, checkpoint) {
     if (!d.traveler_id) {
       throw new AppError('No traveler is assigned to this delivery', 400, 'NFC_NOT_READY');
     }
-    if (!['ready_for_handoff', 'collected'].includes(d.status)) {
+    if (
+      !['bid_accepted', 'matched', 'ready_for_handoff', 'collected'].includes(
+        d.status
+      )
+    ) {
       throw new AppError(
-        d.status === 'bid_accepted' || d.status === 'matched'
-          ? 'Confirm meetup location before NFC Checkpoint 1'
-          : 'NFC Checkpoint 1 is not available for this delivery yet',
+        'NFC Checkpoint 1 is not available for this delivery yet',
         400,
         'NFC_NOT_READY'
       );

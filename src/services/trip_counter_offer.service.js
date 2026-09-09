@@ -31,11 +31,30 @@ async function travelerDisplayName(travelerId) {
   return name || 'A traveler';
 }
 
-function deliveryRoute(row) {
+/** Prefer the map/airport place the sender selected over bare country names. */
+function routeEndpoints(row) {
   if (row.delivery_type === 'country_to_country') {
-    return `${row.origin_country || '—'} → ${row.destination_country || '—'}`;
+    const from =
+      String(row.origin_airport || '').trim() ||
+      String(row.from_city || '').trim() ||
+      String(row.origin_country || '').trim() ||
+      '';
+    const to =
+      String(row.destination_airport || '').trim() ||
+      String(row.to_city || '').trim() ||
+      String(row.destination_country || '').trim() ||
+      '';
+    return { from, to };
   }
-  return `${row.from_city || '—'} → ${row.to_city || '—'}`;
+  return {
+    from: String(row.from_city || '').trim(),
+    to: String(row.to_city || '').trim(),
+  };
+}
+
+function deliveryRoute(row) {
+  const { from, to } = routeEndpoints(row);
+  return `${from || '—'} → ${to || '—'}`;
 }
 
 function photoPublicUrl(filePath) {
@@ -74,6 +93,7 @@ function mapDeliveryPhotos(raw) {
 export function mapCounterOffer(row) {
   const senderName = String(row.sender_name ?? '').trim() || 'Sender';
   const photos = mapDeliveryPhotos(row.photos);
+  const endpoints = routeEndpoints(row);
   return {
     id: row.id,
     requestId: row.sender_request_id,
@@ -83,10 +103,12 @@ export function mapCounterOffer(row) {
     deliveryPublicId: row.delivery_public_id,
     deliveryType: row.delivery_type,
     route: deliveryRoute(row),
-    fromCity: row.from_city || '',
-    toCity: row.to_city || '',
+    fromCity: endpoints.from,
+    toCity: endpoints.to,
     originCountry: row.origin_country,
+    originAirport: row.origin_airport || null,
     destinationCountry: row.destination_country,
+    destinationAirport: row.destination_airport || null,
     travelDate: formatDateOnly(row.delivery_travel_date),
     maxBudget: Number(row.max_budget) || 0,
     photoCount: photos.length || Number(row.photo_count) || 0,
@@ -97,6 +119,8 @@ export function mapCounterOffer(row) {
     senderName,
     senderInitial: senderName[0].toUpperCase(),
     senderRating: row.sender_rating != null ? Number(row.sender_rating) : null,
+    message: row.message ? String(row.message) : null,
+    isAcceptance: Boolean(row.is_acceptance),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sentAt: row.updated_at || row.created_at,
@@ -107,6 +131,7 @@ export function mapCounterOffer(row) {
 export function mapCounterOfferForSender(row) {
   const travelerName = String(row.traveler_name ?? '').trim() || 'Traveler';
   const photos = mapDeliveryPhotos(row.photos);
+  const endpoints = routeEndpoints(row);
   return {
     id: row.id,
     requestId: row.sender_request_id,
@@ -116,10 +141,12 @@ export function mapCounterOfferForSender(row) {
     deliveryPublicId: row.delivery_public_id,
     deliveryType: row.delivery_type,
     route: deliveryRoute(row),
-    fromCity: row.from_city || '',
-    toCity: row.to_city || '',
+    fromCity: endpoints.from,
+    toCity: endpoints.to,
     originCountry: row.origin_country,
+    originAirport: row.origin_airport || null,
     destinationCountry: row.destination_country,
+    destinationAirport: row.destination_airport || null,
     travelDate: formatDateOnly(row.delivery_travel_date),
     maxBudget: Number(row.max_budget) || 0,
     photoCount: photos.length || Number(row.photo_count) || 0,
@@ -133,6 +160,7 @@ export function mapCounterOfferForSender(row) {
       row.traveler_rating != null ? Number(row.traveler_rating) : null,
     travelerReviewCount: Number(row.traveler_review_count) || 0,
     travelerBio: row.traveler_bio || null,
+    message: row.message ? String(row.message) : null,
     deliveryStatus: row.delivery_status || null,
     paymentPending:
       row.status === 'accepted' && row.delivery_status === 'posted',
@@ -170,6 +198,19 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
     );
   }
 
+  let message = existing?.message ? String(existing.message) : null;
+  if (Object.prototype.hasOwnProperty.call(body, 'message')) {
+    const messageRaw = String(body.message ?? '').trim();
+    message = messageRaw.length > 0 ? messageRaw.slice(0, 2000) : null;
+  }
+
+  const isUpdate = existing != null;
+  const maxBudget = Number(request.max_budget) || 0;
+  // Accept Offer uses sender max budget; a lower amount is a real counter offer.
+  const acceptedOffer =
+    body.acceptedOffer === true ||
+    (!isUpdate && Math.abs(amount - maxBudget) < 0.005);
+
   const row = await offerRepository.upsertCounterOffer({
     senderRequestId: request.id,
     deliveryId: request.delivery_id,
@@ -177,6 +218,9 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
     senderId: request.sender_id,
     travelerId,
     amount,
+    message,
+    // Only the first Accept Offer insert is an acceptance; revisions are counters.
+    isAcceptance: acceptedOffer && !isUpdate,
   });
 
   if (!row) {
@@ -191,16 +235,10 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
   const full = await offerRepository.findOfferForTraveler(row.id, travelerId);
   const mapped = mapCounterOffer(full || { ...row, ...request, sender_name: request.sender_name });
 
-  const isUpdate = existing != null;
   const deliveryPublicId = mapped.deliveryPublicId || request.delivery_public_id;
   const travelerName = await travelerDisplayName(travelerId).catch(() => 'A traveler');
   const amountLabel = `$${amount.toFixed(2)}`;
   const routeLabel = mapped.route || 'your parcel';
-  const maxBudget = Number(request.max_budget) || 0;
-  // Accept Offer uses sender max budget; a lower amount is a real counter offer.
-  const acceptedOffer =
-    body.acceptedOffer === true ||
-    (!isUpdate && Math.abs(amount - maxBudget) < 0.005);
 
   if (acceptedOffer && !isUpdate) {
     await requestRepository
@@ -280,8 +318,13 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
   return mapped;
 }
 
-export async function listCounterOffersForTraveler(travelerId) {
-  const rows = await offerRepository.listOffersForTraveler(travelerId);
+export async function listCounterOffersForTraveler(
+  travelerId,
+  { filter = 'counter' } = {}
+) {
+  const rows = await offerRepository.listOffersForTraveler(travelerId, {
+    filter,
+  });
   return rows.map(mapCounterOffer);
 }
 

@@ -187,9 +187,17 @@ function assertCountryToCountryMeetups({
 
 function buildRouteLabel(row) {
   if (row.delivery_type === 'country_to_country') {
-    return `${row.origin_country} → ${row.destination_country}`;
+    const from =
+      String(row.origin_airport || '').trim() ||
+      String(row.origin_country || '').trim() ||
+      '—';
+    const to =
+      String(row.destination_airport || '').trim() ||
+      String(row.destination_country || '').trim() ||
+      '—';
+    return `${from} → ${to}`;
   }
-  return `${row.from_city} → ${row.to_city}`;
+  return `${row.from_city || '—'} → ${row.to_city || '—'}`;
 }
 
 function photoPublicUrl(filePath) {
@@ -258,6 +266,8 @@ function mapDelivery(row, photos = []) {
     receiverFeeCents: row.receiver_fee_cents != null ? Number(row.receiver_fee_cents) : 0,
     travelerId: row.traveler_id || null,
     travelerName: row.traveler_name || null,
+    tripId: row.trip_id || null,
+    tripPublicId: row.trip_public_id || null,
     bidAmount: row.bid_amount != null ? Number(row.bid_amount) : null,
     meetupLocation: row.meetup_location || null,
     chatUnlocked: Boolean(row.chat_unlocked),
@@ -694,17 +704,23 @@ export async function listTravelerDeliveries(travelerId, query = {}) {
 }
 
 export async function getDeliveryForTraveler(travelerId, idOrPublicId) {
+  const id = String(idOrPublicId || '').trim();
   const looksLikeUuid =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      idOrPublicId
+      id
     );
 
-  const row = looksLikeUuid
-    ? await deliveryRepository.findDeliveryByIdForTraveler(idOrPublicId, travelerId)
-    : await deliveryRepository.findDeliveryByPublicIdForTraveler(
-        idOrPublicId,
-        travelerId
-      );
+  let row = looksLikeUuid
+    ? await deliveryRepository.findDeliveryByIdForTraveler(id, travelerId)
+    : await deliveryRepository.findDeliveryByPublicIdForTraveler(id, travelerId);
+
+  // My Trips / Home pass trip public ids (TR-…); resolve to the linked delivery.
+  if (!row && /^TR-/i.test(id)) {
+    row = await deliveryRepository.findDeliveryByTripPublicIdForTraveler(
+      id,
+      travelerId
+    );
+  }
 
   if (!row) {
     throw new AppError('Delivery not found', 404, 'NOT_FOUND');

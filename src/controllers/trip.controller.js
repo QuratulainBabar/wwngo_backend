@@ -68,7 +68,8 @@ export const acceptSenderRequest = asyncHandler(async (req, res) => {
   const requestService = await import('../services/trip_sender_request.service.js');
   const data = await requestService.acceptSenderRequest(
     req.user.id,
-    req.params.requestId
+    req.params.requestId,
+    req.body || {}
   );
   res.json({ success: true, data });
 });
@@ -123,10 +124,15 @@ export const createCounterOffer = asyncHandler(async (req, res) => {
 
 /**
  * GET /api/v1/trips/counter-offers
+ * Query: filter=counter (default) | acceptance
  */
 export const listCounterOffers = asyncHandler(async (req, res) => {
   const offerService = await import('../services/trip_counter_offer.service.js');
-  const offers = await offerService.listCounterOffersForTraveler(req.user.id);
+  const raw = String(req.query.filter || 'counter').trim().toLowerCase();
+  const filter = raw === 'acceptance' ? 'acceptance' : 'counter';
+  const offers = await offerService.listCounterOffersForTraveler(req.user.id, {
+    filter,
+  });
   res.json({ success: true, data: { offers } });
 });
 

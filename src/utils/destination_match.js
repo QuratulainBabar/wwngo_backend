@@ -6,7 +6,59 @@
  * City-to-city: compare destination city labels (to_city).
  *   to_code is a country ISO — it must NOT be used as a city match key.
  * Country-to-country: compare destination country ISO codes and/or names.
+ * Cross-type is allowed when ISO codes agree (e.g. country parcel CZ ↔
+ * city trip ending in CZ / "Prague, Czechia").
  */
+
+/** Common official / colloquial country name variants → canonical key. */
+const COUNTRY_NAME_ALIASES = {
+  czechia: 'czechia',
+  'czech republic': 'czechia',
+  'united states': 'united states',
+  'united states of america': 'united states',
+  usa: 'united states',
+  'u s a': 'united states',
+  'u s': 'united states',
+  'united kingdom': 'united kingdom',
+  'great britain': 'united kingdom',
+  britain: 'united kingdom',
+  uk: 'united kingdom',
+  'u k': 'united kingdom',
+  russia: 'russia',
+  'russian federation': 'russia',
+  'south korea': 'south korea',
+  'korea republic of': 'south korea',
+  'republic of korea': 'south korea',
+  'north korea': 'north korea',
+  'korea democratic people s republic of': 'north korea',
+  vietnam: 'vietnam',
+  'viet nam': 'vietnam',
+  laos: 'laos',
+  'lao people s democratic republic': 'laos',
+  syria: 'syria',
+  'syrian arab republic': 'syria',
+  iran: 'iran',
+  'iran islamic republic of': 'iran',
+  bolivia: 'bolivia',
+  'bolivia plurinational state of': 'bolivia',
+  venezuela: 'venezuela',
+  'venezuela bolivarian republic of': 'venezuela',
+  tanzania: 'tanzania',
+  'tanzania united republic of': 'tanzania',
+  moldova: 'moldova',
+  'moldova republic of': 'moldova',
+  'ivory coast': 'cote d ivoire',
+  "cote d ivoire": 'cote d ivoire',
+  'cape verde': 'cabo verde',
+  'cabo verde': 'cabo verde',
+  swaziland: 'eswatini',
+  eswatini: 'eswatini',
+  macedonia: 'north macedonia',
+  'north macedonia': 'north macedonia',
+  'macedonia the former yugoslav republic of': 'north macedonia',
+  brunei: 'brunei',
+  'brunei darussalam': 'brunei',
+};
 
 export function normalizePlace(value) {
   return String(value ?? '')
@@ -14,6 +66,13 @@ export function normalizePlace(value) {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Canonical country label for alias-aware matching. */
+export function normalizeCountryName(value) {
+  const normalized = normalizePlace(value);
+  if (!normalized) return '';
+  return COUNTRY_NAME_ALIASES[normalized] || normalized;
 }
 
 /**
@@ -29,13 +88,18 @@ export function placeHead(value) {
 
 /**
  * True when two place labels refer to the same destination.
- * Uses exact equality, containment, or matching city heads.
+ * Uses exact equality, containment, country aliases, or matching city heads.
  */
 export function placesMatch(a, b) {
   const left = normalizePlace(a);
   const right = normalizePlace(b);
   if (!left || !right) return false;
   if (left === right) return true;
+
+  const leftCountry = normalizeCountryName(a);
+  const rightCountry = normalizeCountryName(b);
+  if (leftCountry && rightCountry && leftCountry === rightCountry) return true;
+
   if (left.includes(right) || right.includes(left)) return true;
 
   const leftHead = placeHead(a);
@@ -108,15 +172,42 @@ export function tripDestination(trip) {
 
 /**
  * Hard filter: traveler To must match sender To (city or country as applicable).
+ * Same corridor may be posted as country-to-country (airports) or city-to-city;
+ * ISO code agreement or label/alias match is enough.
  */
 export function destinationsMatch(delivery, trip) {
   const senderTo = deliveryDestination(delivery);
   const travelerTo = tripDestination(trip);
 
+  // Shared destination country ISO (country parcel ↔ city trip in that country).
+  if (codesMatch(senderTo.code, travelerTo.code)) {
+    if (isCountryToCountry(delivery) || isCountryToCountry(trip)) {
+      return true;
+    }
+  }
+
   if (isCountryToCountry(delivery) || isCountryToCountry(trip)) {
-    // Both sides should be country-level; require same delivery/trip type upstream.
-    if (codesMatch(senderTo.code, travelerTo.code)) return true;
-    return placesMatch(senderTo.label, travelerTo.label);
+    // "Czechia" ↔ "Czech Republic", or country name contained in "Prague, Czechia".
+    if (placesMatch(senderTo.label, travelerTo.label)) return true;
+    const senderCountry = normalizeCountryName(senderTo.label);
+    const travelerLabel = normalizePlace(travelerTo.label);
+    if (
+      senderCountry &&
+      travelerLabel &&
+      travelerLabel.includes(senderCountry)
+    ) {
+      return true;
+    }
+    const travelerCountry = normalizeCountryName(travelerTo.label);
+    const senderLabel = normalizePlace(senderTo.label);
+    if (
+      travelerCountry &&
+      senderLabel &&
+      senderLabel.includes(travelerCountry)
+    ) {
+      return true;
+    }
+    return false;
   }
 
   // City-to-city: match on city labels only. Country ISO in to_code is not a city id.

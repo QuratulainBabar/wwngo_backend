@@ -6,6 +6,7 @@ const OFFER_SELECT = `
          d.delivery_type,
          d.from_city, d.to_city,
          d.origin_country, d.destination_country,
+         d.origin_airport, d.destination_airport,
          d.travel_date AS delivery_travel_date,
          d.parcel_category, d.parcel_size, d.weight_kg, d.max_budget,
          d.description AS delivery_description,
@@ -41,6 +42,7 @@ const SENDER_OFFER_SELECT = `
          d.delivery_type,
          d.from_city, d.to_city,
          d.origin_country, d.destination_country,
+         d.origin_airport, d.destination_airport,
          d.travel_date AS delivery_travel_date,
          d.parcel_category, d.parcel_size, d.weight_kg, d.max_budget,
          d.description AS delivery_description,
@@ -84,14 +86,24 @@ export async function upsertCounterOffer({
   senderId,
   travelerId,
   amount,
+  message = null,
+  isAcceptance = false,
 }) {
   const { rows } = await pool.query(
     `INSERT INTO trip_counter_offers (
-       sender_request_id, delivery_id, trip_id, sender_id, traveler_id, amount, status
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+       sender_request_id, delivery_id, trip_id, sender_id, traveler_id,
+       amount, message, status, is_acceptance
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
      ON CONFLICT (sender_request_id)
      DO UPDATE SET
        amount = EXCLUDED.amount,
+       message = EXCLUDED.message,
+       -- Revising an open offer is always a counter-offer path.
+       is_acceptance = CASE
+         WHEN trip_counter_offers.status IN ('pending', 'updated')
+           THEN FALSE
+         ELSE trip_counter_offers.is_acceptance
+       END,
        status = CASE
          WHEN trip_counter_offers.status IN ('pending', 'updated')
            THEN 'updated'::trip_counter_offer_status
@@ -100,7 +112,16 @@ export async function upsertCounterOffer({
        updated_at = NOW()
      WHERE trip_counter_offers.status IN ('pending', 'updated')
      RETURNING *`,
-    [senderRequestId, deliveryId, tripId, senderId, travelerId, amount]
+    [
+      senderRequestId,
+      deliveryId,
+      tripId,
+      senderId,
+      travelerId,
+      amount,
+      message,
+      Boolean(isAcceptance),
+    ]
   );
   return rows[0] || null;
 }
@@ -115,7 +136,17 @@ export async function findOfferByRequestId(senderRequestId, travelerId) {
   return rows[0] || null;
 }
 
-export async function listOffersForTraveler(travelerId, { limit = 50 } = {}) {
+/**
+ * @param {string} travelerId
+ * @param {{ limit?: number, filter?: 'counter' | 'acceptance' }} [options]
+ *   - counter (default): real traveler counter-offers (`is_acceptance = FALSE`)
+ *   - acceptance: traveler accepted sender's exact max budget (`is_acceptance = TRUE`)
+ */
+export async function listOffersForTraveler(
+  travelerId,
+  { limit = 50, filter = 'counter' } = {}
+) {
+  const acceptanceOnly = filter === 'acceptance';
   const { rows } = await pool.query(
     `${OFFER_SELECT}
      FROM trip_counter_offers o
@@ -123,9 +154,10 @@ export async function listOffersForTraveler(travelerId, { limit = 50 } = {}) {
      INNER JOIN trips t ON t.id = o.trip_id
      INNER JOIN users u ON u.id = o.sender_id
      WHERE o.traveler_id = $1
+       AND o.is_acceptance = $3
      ORDER BY o.updated_at DESC, o.created_at DESC
      LIMIT $2`,
-    [travelerId, limit]
+    [travelerId, limit, acceptanceOnly]
   );
   return rows;
 }

@@ -92,7 +92,10 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
  * Count is dynamic: every open trip that matches is returned (1, 2, 3, …).
  * City-to-city compares to_city labels (including city-head forms like
  * "Paris, France" ↔ "Paris, Île-de-France, France");
- * country-to-country compares country codes/names.
+ * country-to-country compares country codes/names (including aliases like
+ * Czechia ↔ Czech Republic).
+ * Cross-type matches are included when the destination country ISO agrees
+ * (country parcel ↔ city trip ending in that country).
  *
  * Own trips are excluded so sender, traveler, and receiver stay on separate
  * Gmail accounts — the sender cannot match their own traveler trip.

@@ -45,12 +45,28 @@ function formatDateOnly(value) {
 
 function buildRouteLabel(row) {
   if (row.trip_type === 'country_to_country') {
-    return `${row.origin_country} → ${row.destination_country}`;
+    const from =
+      String(row.origin_airport || '').trim() ||
+      String(row.origin_country || '').trim() ||
+      '—';
+    const to =
+      String(row.destination_airport || '').trim() ||
+      String(row.destination_country || '').trim() ||
+      '—';
+    return `${from} → ${to}`;
   }
-  return `${row.from_city} → ${row.to_city}`;
+  return `${row.from_city || '—'} → ${row.to_city || '—'}`;
 }
 
 export function mapTrip(row) {
+  const origin =
+    row.trip_type === 'country_to_country'
+      ? String(row.origin_airport || '').trim() || row.origin_country
+      : row.from_city;
+  const destination =
+    row.trip_type === 'country_to_country'
+      ? String(row.destination_airport || '').trim() || row.destination_country
+      : row.to_city;
   return {
     id: row.id,
     publicId: row.public_id,
@@ -77,9 +93,8 @@ export function mapTrip(row) {
       ? Number(row.luggage_capacity_kg)
       : null,
     flightNumber: row.flight_number,
-    origin: row.trip_type === 'country_to_country' ? row.origin_country : row.from_city,
-    destination:
-      row.trip_type === 'country_to_country' ? row.destination_country : row.to_city,
+    origin,
+    destination,
     route: buildRouteLabel(row),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

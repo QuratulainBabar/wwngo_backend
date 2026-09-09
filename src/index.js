@@ -132,6 +132,10 @@ function lanIpv4Addresses() {
 async function startServer() {
   try {
     await pool.query('SELECT 1');
+    await pool.query(`
+      ALTER TABLE trip_counter_offers
+      ADD COLUMN IF NOT EXISTS message TEXT
+    `);
     console.log('PostgreSQL connected successfully.');
   } catch (err) {
     console.error('Failed to connect to PostgreSQL:', err.message);

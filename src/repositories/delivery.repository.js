@@ -182,11 +182,13 @@ export async function findDeliveryByIdForTraveler(id, travelerId) {
     `SELECT d.*,
             s.name AS sender_name,
             t.name AS traveler_name,
-            r.name AS receiver_name
+            r.name AS receiver_name,
+            tr.public_id AS trip_public_id
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
      LEFT JOIN users r ON r.id = d.receiver_id
+     LEFT JOIN trips tr ON tr.id = d.trip_id
      WHERE d.id = $1 AND d.traveler_id = $2`,
     [id, travelerId]
   );
@@ -198,13 +200,43 @@ export async function findDeliveryByPublicIdForTraveler(publicId, travelerId) {
     `SELECT d.*,
             s.name AS sender_name,
             t.name AS traveler_name,
-            r.name AS receiver_name
+            r.name AS receiver_name,
+            tr.public_id AS trip_public_id
      FROM deliveries d
      LEFT JOIN users s ON s.id = d.sender_id
      LEFT JOIN users t ON t.id = d.traveler_id
      LEFT JOIN users r ON r.id = d.receiver_id
+     LEFT JOIN trips tr ON tr.id = d.trip_id
      WHERE d.public_id = $1 AND d.traveler_id = $2`,
     [publicId, travelerId]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Resolve a traveler trip public id (TR-…) to the linked assigned delivery.
+ * Used when My Trips / Home open the shipment detail screen with a trip id.
+ */
+export async function findDeliveryByTripPublicIdForTraveler(
+  tripPublicId,
+  travelerId
+) {
+  const { rows } = await pool.query(
+    `SELECT d.*,
+            s.name AS sender_name,
+            t.name AS traveler_name,
+            r.name AS receiver_name,
+            tr.public_id AS trip_public_id
+     FROM deliveries d
+     INNER JOIN trips tr ON tr.id = d.trip_id
+     LEFT JOIN users s ON s.id = d.sender_id
+     LEFT JOIN users t ON t.id = d.traveler_id
+     LEFT JOIN users r ON r.id = d.receiver_id
+     WHERE tr.public_id = $1
+       AND d.traveler_id = $2
+     ORDER BY d.updated_at DESC NULLS LAST, d.created_at DESC
+     LIMIT 1`,
+    [tripPublicId, travelerId]
   );
   return rows[0] || null;
 }
@@ -620,39 +652,65 @@ export async function listDeliveriesForTripSenderNotification({
      FROM deliveries d
      WHERE d.status = 'posted'
        AND d.receiver_accepted_at IS NOT NULL
-       AND d.delivery_type = $1
        AND d.sender_id <> $2::uuid
        AND (
          (
-           $1 = 'city_to_city'
-           AND $4 <> ''
+           d.delivery_type = $1
            AND (
-             LOWER(COALESCE(d.to_city, '')) = $4
-             OR LOWER(COALESCE(d.to_city, '')) = $5
-             OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $4 || '%'
-             OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $5 || '%'
-             OR $4 LIKE '%' || LOWER(COALESCE(d.to_city, '')) || '%'
-             OR $5 LIKE '%' || LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) || '%'
-             OR LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) = $5
+             (
+               $1 = 'city_to_city'
+               AND $4 <> ''
+               AND (
+                 LOWER(COALESCE(d.to_city, '')) = $4
+                 OR LOWER(COALESCE(d.to_city, '')) = $5
+                 OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $4 || '%'
+                 OR LOWER(COALESCE(d.to_city, '')) LIKE '%' || $5 || '%'
+                 OR $4 LIKE '%' || LOWER(COALESCE(d.to_city, '')) || '%'
+                 OR $5 LIKE '%' || LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) || '%'
+                 OR LOWER(split_part(COALESCE(d.to_city, ''), ',', 1)) = $5
+               )
+             )
+             OR (
+               $1 = 'country_to_country'
+               AND (
+                 (
+                   $3 <> ''
+                   AND UPPER(COALESCE(d.to_code, '')) = $3
+                 )
+                 OR (
+                   $4 <> ''
+                   AND (
+                     LOWER(COALESCE(d.destination_country, '')) = $4
+                     OR LOWER(COALESCE(d.destination_country, '')) LIKE '%' || $4 || '%'
+                     OR $4 LIKE '%' || LOWER(COALESCE(d.destination_country, '')) || '%'
+                   )
+                 )
+               )
+             )
+           )
+         )
+         OR (
+           $1 = 'city_to_city'
+           AND d.delivery_type = 'country_to_country'
+           AND (
+             ($3 <> '' AND UPPER(COALESCE(d.to_code, '')) = $3)
+             OR (
+               $4 <> ''
+               AND (
+                 LOWER(COALESCE(d.destination_country, '')) LIKE '%' || $4 || '%'
+                 OR LOWER(COALESCE(d.destination_airport, '')) LIKE '%' || $5 || '%'
+               )
+             )
            )
          )
          OR (
            $1 = 'country_to_country'
+           AND d.delivery_type = 'city_to_city'
            AND (
-             (
-               $3 <> ''
-               AND (
-                 UPPER(COALESCE(d.to_code, '')) = $3
-                 OR UPPER(COALESCE(d.destination_country_code, '')) = $3
-               )
-             )
+             ($3 <> '' AND UPPER(COALESCE(d.to_code, '')) = $3)
              OR (
                $4 <> ''
-               AND (
-                 LOWER(COALESCE(d.destination_country, '')) = $4
-                 OR LOWER(COALESCE(d.destination_country, '')) LIKE '%' || $4 || '%'
-                 OR $4 LIKE '%' || LOWER(COALESCE(d.destination_country, '')) || '%'
-               )
+               AND LOWER(COALESCE(d.to_city, '')) LIKE '%' || $4 || '%'
              )
            )
          )

@@ -61,10 +61,12 @@ const REQUEST_SELECT = `
           d.delivery_type,
           d.from_city, d.to_city,
           d.origin_country, d.destination_country,
+          d.origin_airport, d.destination_airport,
           d.travel_date AS delivery_travel_date,
           d.parcel_category, d.parcel_size, d.weight_kg, d.max_budget,
           d.description AS delivery_description,
           d.preferred_meetup_locations,
+          d.receiver_meetup_location,
           (
             SELECT COUNT(*)::int
             FROM delivery_photos p
