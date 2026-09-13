@@ -58,6 +58,20 @@ export async function createSenderRequest({
 /** Deliveries still open for traveler matching (not yet booked). */
 const OPEN_MATCHING_DELIVERY_SQL = `d.status IN ('posted', 'waiting_receiver')`;
 
+/**
+ * Traveler already finished this request (Accept Offer / max-budget accept, or
+ * a sent counter). Keep those off the Sender Requests inbox; they live under
+ * Accepted Offers / Counter Offers instead.
+ */
+const TRAVELER_ALREADY_RESPONDED_SQL = `
+  NOT EXISTS (
+    SELECT 1
+    FROM trip_counter_offers o
+    WHERE o.sender_request_id = r.id
+      AND o.traveler_id = r.traveler_id
+  )
+`;
+
 const REQUEST_SELECT = `
   SELECT r.*,
           d.public_id AS delivery_public_id,
@@ -113,6 +127,7 @@ export async function listPendingRequestsForTraveler(travelerId, { limit = 50 } 
        AND r.status = 'pending'
        AND ${OPEN_MATCHING_DELIVERY_SQL}
        AND t.status = 'open_bid'
+       AND ${TRAVELER_ALREADY_RESPONDED_SQL}
      ORDER BY r.created_at DESC
      LIMIT $2`,
     [travelerId, limit]
@@ -129,7 +144,8 @@ export async function countPendingRequestsForTraveler(travelerId) {
      WHERE r.traveler_id = $1
        AND r.status = 'pending'
        AND ${OPEN_MATCHING_DELIVERY_SQL}
-       AND t.status = 'open_bid'`,
+       AND t.status = 'open_bid'
+       AND ${TRAVELER_ALREADY_RESPONDED_SQL}`,
     [travelerId]
   );
   return Number(rows[0]?.count) || 0;
@@ -179,7 +195,8 @@ export async function countUnreadRequestsForTraveler(travelerId) {
        AND r.status = 'pending'
        AND r.read_at IS NULL
        AND ${OPEN_MATCHING_DELIVERY_SQL}
-       AND t.status = 'open_bid'`,
+       AND t.status = 'open_bid'
+       AND ${TRAVELER_ALREADY_RESPONDED_SQL}`,
     [travelerId]
   );
   return Number(rows[0]?.count) || 0;
@@ -214,6 +231,7 @@ export async function listPendingRequestsForTrip(tripId, travelerId) {
        AND r.traveler_id = $2
        AND r.status = 'pending'
        AND ${OPEN_MATCHING_DELIVERY_SQL}
+       AND ${TRAVELER_ALREADY_RESPONDED_SQL}
      ORDER BY r.created_at DESC`,
     [tripId, travelerId]
   );
@@ -266,17 +284,14 @@ export async function countPendingRequestsForTrip(tripId) {
 
 export async function respondToSenderRequest(requestId, travelerId, status) {
   const { rows } = await pool.query(
-    `UPDATE trip_sender_requests r
-     SET status = $3,
+    `UPDATE trip_sender_requests
+     SET status = $3::trip_sender_request_status,
          responded_at = NOW(),
          updated_at = NOW()
-     FROM deliveries d
-     WHERE r.id = $1
-       AND r.traveler_id = $2
-       AND r.status = 'pending'
-       AND d.id = r.delivery_id
-       AND ${OPEN_MATCHING_DELIVERY_SQL}
-     RETURNING r.*`,
+     WHERE id = $1
+       AND traveler_id = $2
+       AND status = 'pending'
+     RETURNING *`,
     [requestId, travelerId, status]
   );
   return rows[0] || null;
@@ -295,6 +310,7 @@ export async function listTripsWithPendingRequestsForTraveler(travelerId) {
      WHERE t.traveler_id = $1
        AND t.status = 'open_bid'
        AND ${OPEN_MATCHING_DELIVERY_SQL}
+       AND ${TRAVELER_ALREADY_RESPONDED_SQL}
      GROUP BY t.id
      ORDER BY MAX(r.created_at) DESC`,
     [travelerId]

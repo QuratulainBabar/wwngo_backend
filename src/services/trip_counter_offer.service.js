@@ -241,14 +241,24 @@ export async function createOrUpdateCounterOffer(travelerId, requestId, body = {
   const routeLabel = mapped.route || 'your parcel';
 
   if (acceptedOffer && !isUpdate) {
-    await requestRepository
-      .respondToSenderRequest(requestId, travelerId, 'accepted')
-      .catch((err) => {
+    try {
+      const marked = await requestRepository.respondToSenderRequest(
+        request.id,
+        travelerId,
+        'accepted'
+      );
+      if (!marked) {
         console.error(
-          '[counter-offer] mark sender request accepted failed:',
-          err?.message || err
+          '[counter-offer] mark sender request accepted returned no row',
+          request.id
         );
-      });
+      }
+    } catch (err) {
+      console.error(
+        '[counter-offer] mark sender request accepted failed:',
+        err?.message || err
+      );
+    }
   }
 
   let title;
