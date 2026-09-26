@@ -57,7 +57,7 @@ export function requireWalletMinimum(role = 'traveler') {
 
 /**
  * Sender create-time wallet check only — never debit platform fees here.
- * Document/object fees ($2/$4, or $3/$6 when paying 100%) are collected at Pay Now.
+ * Fees ($2, or $3 when paying 100%) are collected at Pay Now.
  */
 export function requireSenderWalletForDeliveryCreate(req, _res, next) {
   (async () => {

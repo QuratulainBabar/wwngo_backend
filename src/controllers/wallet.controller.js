@@ -44,13 +44,14 @@ export const grantKycWelcomeCredit = asyncHandler(async (req, res) => {
 
 /**
  * POST /api/v1/wallet/top-up
- * body: { role, amountCents }
+ * body: { role, amountCents, currency? }
  */
 export const topUp = asyncHandler(async (req, res) => {
   const data = await walletService.topUp(
     req.user.id,
     req.body.role,
-    req.body.amountCents
+    req.body.amountCents,
+    req.body.currency
   );
   res.status(201).json({ success: true, data });
 });
@@ -70,13 +71,14 @@ export const getPaymentsConfig = asyncHandler(async (_req, res) => {
 
 /**
  * POST /api/v1/wallet/withdraw
- * body: { role, amountCents }
+ * body: { role, amountCents, currency? }
  */
 export const withdraw = asyncHandler(async (req, res) => {
   const data = await walletService.withdraw(
     req.user.id,
     req.body.role,
-    req.body.amountCents
+    req.body.amountCents,
+    req.body.currency
   );
   res.json({ success: true, data });
 });

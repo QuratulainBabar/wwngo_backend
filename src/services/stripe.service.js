@@ -19,7 +19,12 @@ async function getStripe() {
   return stripe;
 }
 
-export async function createPaymentIntent({ amountCents, customerId, metadata = {} }) {
+export async function createPaymentIntent({
+  amountCents,
+  customerId,
+  metadata = {},
+  currency = 'usd',
+}) {
   const s = await getStripe();
   if (!s) {
     return {
@@ -31,10 +36,32 @@ export async function createPaymentIntent({ amountCents, customerId, metadata = 
   }
   return s.paymentIntents.create({
     amount: amountCents,
-    currency: 'usd',
+    currency: normalizeCurrency(currency),
     metadata: { ...metadata, userId: customerId },
     automatic_payment_methods: { enabled: true },
   });
+}
+
+const SUPPORTED_CURRENCIES = new Set([
+  'usd',
+  'eur',
+  'gbp',
+  'cad',
+  'aud',
+  'aed',
+  'sar',
+  'qar',
+  'kwd',
+  'bhd',
+  'omr',
+  'inr',
+  'cny',
+  'try',
+]);
+
+function normalizeCurrency(currency) {
+  const code = String(currency || 'usd').trim().toLowerCase();
+  return SUPPORTED_CURRENCIES.has(code) ? code : 'usd';
 }
 
 export async function retrievePaymentIntent(paymentIntentId) {
@@ -84,14 +111,14 @@ export async function getConnectAccount(accountId) {
   return s.accounts.retrieve(accountId);
 }
 
-export async function createConnectTransfer({ amountCents, destinationAccount, metadata = {} }) {
+export async function createConnectTransfer({ amountCents, destinationAccount, metadata = {}, currency = 'usd' }) {
   const s = await getStripe();
   if (!s) {
     return { id: `mock_tr_${Date.now()}`, mock: true };
   }
   return s.transfers.create({
     amount: amountCents,
-    currency: 'usd',
+    currency: normalizeCurrency(currency),
     destination: destinationAccount,
     metadata,
   });

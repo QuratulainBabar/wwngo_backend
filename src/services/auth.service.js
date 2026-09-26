@@ -29,10 +29,29 @@ import {
 const USER_COLUMNS = `
   id, name, email, phone, country_code, bio, rating, review_count,
   wallet_balance, is_verified, kyc_status, account_status, created_at,
-  email_verified, phone_verified, role, avatar_url
+  email_verified, phone_verified, role, avatar_url, login_otp_verified_at,
+  is_admin
 `;
 
 const ALLOWED_ROLES = ['sender', 'traveler', 'receiver'];
+
+/** Login email OTP is required again after this interval. */
+const LOGIN_OTP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isWeeklyLoginOtpRequired(userRow) {
+  const raw = userRow?.login_otp_verified_at;
+  if (!raw) return true;
+  const at = new Date(raw).getTime();
+  if (Number.isNaN(at)) return true;
+  return Date.now() - at >= LOGIN_OTP_INTERVAL_MS;
+}
+
+async function markLoginOtpVerified(userId) {
+  await pool.query(
+    `UPDATE users SET login_otp_verified_at = NOW() WHERE id = $1`,
+    [userId]
+  );
+}
 
 function mapUser(row) {
   if (!row) return null;
@@ -220,8 +239,8 @@ export async function registerUser({
     const { rows } = await pool.query(
       `INSERT INTO users (
         name, email, phone, password_hash, country_code, terms_accepted_at,
-        email_verified, phone_verified
-      ) VALUES ($1, $2, $3, $4, $5, NOW(), FALSE, FALSE)
+        email_verified, phone_verified, login_otp_verified_at
+      ) VALUES ($1, $2, $3, $4, $5, NOW(), FALSE, FALSE, NOW())
       RETURNING ${USER_COLUMNS}`,
       [name.trim(), normalizedEmail, normalizedPhone, passwordHash, normalizedCountry]
     );
@@ -266,6 +285,15 @@ export async function loginUser({ email, password }) {
 
   await clearFailedLogins(userRow.id);
 
+  // Weekly email OTP gate: after 7 days (or never verified), credentials alone are not enough.
+  // Admin console has no OTP UI — skip for admin accounts.
+  if (isWeeklyLoginOtpRequired(userRow) && !userRow.is_admin) {
+    return {
+      requiresLoginOtp: true,
+      email: normalizeEmail(userRow.email),
+    };
+  }
+
   const user = mapUser(userRow);
   const accessToken = signAccessToken(user);
   const refresh = await createRefreshToken(user.id);
@@ -297,6 +325,14 @@ export async function sendPasswordLoginOtp({ email, password }) {
     );
     await recordFailedLogin(userRow.id);
     throw new AppError('Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
+
+  if (!isWeeklyLoginOtpRequired(userRow)) {
+    throw new AppError(
+      'Login verification is not required right now. Sign in with your password.',
+      400,
+      'LOGIN_OTP_NOT_REQUIRED'
+    );
   }
 
   // Same contact normalization + SMTP helper as verify-email / password-reset.
@@ -409,9 +445,147 @@ export async function completePasswordLoginOtp({ email, password, code }) {
     `UPDATE users SET email_verified = TRUE WHERE id = $1`,
     [unlocked.id]
   );
+  await markLoginOtpVerified(unlocked.id);
   await clearFailedLogins(unlocked.id);
   const fresh = await findUserById(unlocked.id);
   return issueAuthSession(fresh || unlocked);
+}
+
+/**
+ * Whether the authenticated user must complete the weekly login email OTP
+ * before accessing the app (covers biometric unlock / session restore).
+ */
+export async function getWeeklyLoginOtpStatus(userId) {
+  const userRow = await findUserById(userId);
+  if (!userRow) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+  assertAccountActive(userRow);
+  return {
+    required: isWeeklyLoginOtpRequired(userRow),
+    email: normalizeEmail(userRow.email),
+  };
+}
+
+/**
+ * Authenticated weekly login OTP send (biometric / session restore path).
+ * Does not require the password — the user already holds a valid session.
+ */
+export async function sendAuthenticatedLoginOtp(userId) {
+  const userRow = await findUserById(userId);
+  if (!userRow) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+  assertAccountActive(userRow);
+
+  if (!isWeeklyLoginOtpRequired(userRow)) {
+    throw new AppError(
+      'Login verification is not required right now.',
+      400,
+      'LOGIN_OTP_NOT_REQUIRED'
+    );
+  }
+
+  const contact = normalizeEmail(userRow.email);
+  if (!contact) {
+    throw new AppError('Email not linked to your account', 400, 'CONTACT_MISSING');
+  }
+
+  const purpose = 'login_gate';
+  await assertOtpRateLimit(contact, purpose);
+
+  await pool.query(
+    `UPDATE otp_codes SET verified_at = NOW()
+     WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
+    [userRow.id, purpose]
+  );
+
+  const code = generateOtp();
+  const otp = await createOtpRecord(code);
+
+  await pool.query(
+    `INSERT INTO otp_codes (user_id, contact, contact_type, code_hash, purpose, expires_at)
+     VALUES ($1, $2, 'email', $3, $4, $5)`,
+    [userRow.id, contact, otp.codeHash, purpose, otp.expiresAt]
+  );
+
+  console.log(`[AUTH] session login-otp queued SMTP email for ${contact}`);
+  void sendOtpEmail(contact, code, {
+    purposeLabel: 'login',
+    subject: 'Your WWNGO login code',
+  }).catch((err) => {
+    console.error(
+      `[AUTH] session login-otp email failed for ${contact}:`,
+      err?.message || err
+    );
+  });
+
+  return {
+    message: 'Verification code sent',
+    expiresInMinutes: env.otp.expiresMinutes,
+    email: contact,
+  };
+}
+
+/**
+ * Authenticated weekly login OTP verify — starts the next 7-day period.
+ */
+export async function verifyAuthenticatedLoginOtp(userId, code) {
+  const normalizedCode = assertOtpFormat(code);
+  if (!normalizedCode) {
+    throw new AppError('Enter the 6-digit code', 400, 'INVALID_OTP');
+  }
+
+  const userRow = await findUserById(userId);
+  if (!userRow) {
+    throw new AppError('User not found', 404, 'USER_NOT_FOUND');
+  }
+  assertAccountActive(userRow);
+
+  const contact = normalizeEmail(userRow.email);
+  const purpose = 'login_gate';
+
+  if (isDemoOtp(normalizedCode)) {
+    await pool.query(
+      `UPDATE otp_codes SET verified_at = NOW()
+       WHERE user_id = $1 AND purpose = $2 AND verified_at IS NULL`,
+      [userRow.id, purpose]
+    );
+  } else {
+    const { rows } = await pool.query(
+      `SELECT oc.*
+       FROM otp_codes oc
+       WHERE oc.user_id = $1
+         AND oc.contact = $2
+         AND oc.contact_type = 'email'
+         AND oc.purpose = $3
+         AND oc.verified_at IS NULL
+         AND oc.expires_at > NOW()
+       ORDER BY oc.created_at DESC
+       LIMIT 1`,
+      [userRow.id, contact, purpose]
+    );
+
+    const otpRow = rows[0];
+    if (!otpRow) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    const validOtp = await verifyTokenHash(normalizedCode, otpRow.code_hash);
+    if (!validOtp) {
+      throw new AppError('Invalid or expired verification code', 400, 'INVALID_OTP');
+    }
+
+    await pool.query('UPDATE otp_codes SET verified_at = NOW() WHERE id = $1', [otpRow.id]);
+  }
+
+  await pool.query(
+    `UPDATE users SET email_verified = TRUE WHERE id = $1`,
+    [userRow.id]
+  );
+  await markLoginOtpVerified(userRow.id);
+  const fresh = await findUserById(userRow.id);
+  return { user: mapUser(fresh || userRow) };
 }
 
 export async function getUserProfile(userId) {
@@ -1048,6 +1222,16 @@ export async function uploadUserAvatar(userId, file) {
 
   const updated = await findUserById(userId);
   return { user: mapUser(updated), avatarUrl: stored.publicUrl };
+}
+
+export async function deleteUserAvatar(userId) {
+  await pool.query(
+    `UPDATE users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1`,
+    [userId]
+  );
+
+  const updated = await findUserById(userId);
+  return { user: mapUser(updated), avatarUrl: null };
 }
 
 export async function registerFcmToken(userId, { token, platform }) {

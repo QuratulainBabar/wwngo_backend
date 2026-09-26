@@ -142,7 +142,7 @@ export async function grantKycWelcomeCredit(userId) {
  * Start a Stripe PaymentIntent for wallet top-up. The client completes
  * Payment Sheet, then POST /wallet/top-up/confirm credits the ledger.
  */
-export async function topUp(userId, role, amountCents) {
+export async function topUp(userId, role, amountCents, currency = 'USD') {
   const cents = Number(amountCents);
   if (!Number.isInteger(cents) || cents <= 0) {
     throw new AppError('Top-up amount must be a positive integer (cents)', 400, 'VALIDATION_ERROR');
@@ -157,26 +157,29 @@ export async function topUp(userId, role, amountCents) {
     );
   }
 
-  return createTopUpPaymentIntent(userId, role, cents);
+  return createTopUpPaymentIntent(userId, role, cents, currency);
 }
 
 /**
  * Create Stripe PaymentIntent for wallet top-up; credits on webhook success.
  */
-export async function createTopUpPaymentIntent(userId, role, amountCents) {
+export async function createTopUpPaymentIntent(userId, role, amountCents, currency = 'USD') {
   const stripeService = await import('./stripe.service.js');
   const { pool } = await import('../db/pool.js');
+  const currencyCode = String(currency || 'USD').trim().toUpperCase() || 'USD';
 
   let intent;
   try {
     intent = await stripeService.createPaymentIntent({
       amountCents,
       customerId: userId,
+      currency: currencyCode,
       metadata: {
         purpose: 'wallet_top_up',
         userId,
         role,
         amountCents: String(amountCents),
+        currency: currencyCode,
       },
     });
   } catch (err) {
@@ -210,6 +213,7 @@ export async function createTopUpPaymentIntent(userId, role, amountCents) {
     paymentIntentId: intent.id,
     clientSecret: intent.client_secret,
     amountCents,
+    currency: currencyCode,
     role,
     requiresPayment: true,
     mock: false,
@@ -453,14 +457,14 @@ export async function getPaymentsConfigAsync() {
 /**
  * Debit available balance; uses Stripe Connect transfer when account is linked.
  */
-export async function withdraw(userId, role, amountCents) {
+export async function withdraw(userId, role, amountCents, currency = 'USD') {
   const cents = Number(amountCents);
   if (!Number.isInteger(cents) || cents <= 0) {
     throw new AppError('Withdrawal amount must be a positive integer (cents)', 400, 'VALIDATION_ERROR');
   }
   if (cents < MINIMUM_WITHDRAWAL_CENTS) {
     throw new AppError(
-      `Minimum withdrawal is $${(MINIMUM_WITHDRAWAL_CENTS / 100).toFixed(2)}`,
+      `Minimum withdrawal is ${(MINIMUM_WITHDRAWAL_CENTS / 100).toFixed(2)} ${String(currency || 'USD').toUpperCase()}`,
       400,
       'VALIDATION_ERROR'
     );
@@ -468,6 +472,7 @@ export async function withdraw(userId, role, amountCents) {
 
   const stripeService = await import('./stripe.service.js');
   const { pool } = await import('../db/pool.js');
+  const currencyCode = String(currency || 'USD').trim().toUpperCase() || 'USD';
   const { rows } = await pool.query(
     `SELECT stripe_connect_account_id FROM users WHERE id = $1`,
     [userId]
@@ -526,7 +531,8 @@ export async function withdraw(userId, role, amountCents) {
       await stripeService.createConnectTransfer({
         amountCents: cents,
         destinationAccount: connectAccountId,
-        metadata: { userId, role },
+        currency: currencyCode,
+        metadata: { userId, role, currency: currencyCode },
       });
     } catch (err) {
       await walletRepo.appendLedgerEntry({

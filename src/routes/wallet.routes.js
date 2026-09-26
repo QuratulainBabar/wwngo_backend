@@ -49,6 +49,41 @@ router.post(
   '/top-up',
   roleBody,
   amountCentsBody,
+  body('currency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn([
+      'USD',
+      'EUR',
+      'GBP',
+      'CAD',
+      'AUD',
+      'AED',
+      'SAR',
+      'QAR',
+      'KWD',
+      'BHD',
+      'OMR',
+      'INR',
+      'CNY',
+      'TRY',
+      'usd',
+      'eur',
+      'gbp',
+      'cad',
+      'aud',
+      'aed',
+      'sar',
+      'qar',
+      'kwd',
+      'bhd',
+      'omr',
+      'inr',
+      'cny',
+      'try',
+    ])
+    .withMessage('currency must be a supported ISO code'),
   validate,
   walletController.topUp
 );
@@ -64,6 +99,41 @@ router.post(
   '/withdraw',
   roleBody,
   amountCentsBody,
+  body('currency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn([
+      'USD',
+      'EUR',
+      'GBP',
+      'CAD',
+      'AUD',
+      'AED',
+      'SAR',
+      'QAR',
+      'KWD',
+      'BHD',
+      'OMR',
+      'INR',
+      'CNY',
+      'TRY',
+      'usd',
+      'eur',
+      'gbp',
+      'cad',
+      'aud',
+      'aed',
+      'sar',
+      'qar',
+      'kwd',
+      'bhd',
+      'omr',
+      'inr',
+      'cny',
+      'try',
+    ])
+    .withMessage('currency must be a supported ISO code'),
   validate,
   walletController.withdraw
 );

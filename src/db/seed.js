@@ -23,6 +23,7 @@ async function seed() {
            account_status = 'active',
            email_verified = TRUE,
            is_verified = TRUE,
+           login_otp_verified_at = NOW(),
            updated_at = NOW()
        WHERE id = $2`,
       [passwordHash, existing[0].id]
@@ -35,11 +36,13 @@ async function seed() {
     `INSERT INTO users (
        name, email, phone, password_hash, country_code,
        terms_accepted_at, email_verified, phone_verified,
-       is_verified, is_admin, account_status, role
+       is_verified, is_admin, account_status, role,
+       login_otp_verified_at
      ) VALUES (
        $1, $2, $3, $4, $5,
        NOW(), TRUE, TRUE,
-       TRUE, TRUE, 'active', 'sender'
+       TRUE, TRUE, 'active', 'sender',
+       NOW()
      )`,
     [ADMIN_NAME, ADMIN_EMAIL, ADMIN_PHONE, passwordHash, ADMIN_COUNTRY]
   );

@@ -43,14 +43,35 @@ function formatDateOnly(value) {
   return `${y}-${m}-${day}`;
 }
 
+function formatTimeOnly(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?/);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${String(value.getHours()).padStart(2, '0')}:${String(
+      value.getMinutes()
+    ).padStart(2, '0')}`;
+  }
+  return null;
+}
+
 function buildRouteLabel(row) {
   if (row.trip_type === 'country_to_country') {
     const from =
       String(row.origin_airport || '').trim() ||
+      String(row.from_city || '').trim() ||
       String(row.origin_country || '').trim() ||
       '—';
     const to =
       String(row.destination_airport || '').trim() ||
+      String(row.to_city || '').trim() ||
       String(row.destination_country || '').trim() ||
       '—';
     return `${from} → ${to}`;
@@ -61,11 +82,15 @@ function buildRouteLabel(row) {
 export function mapTrip(row) {
   const origin =
     row.trip_type === 'country_to_country'
-      ? String(row.origin_airport || '').trim() || row.origin_country
+      ? String(row.origin_airport || '').trim() ||
+        String(row.from_city || '').trim() ||
+        row.origin_country
       : row.from_city;
   const destination =
     row.trip_type === 'country_to_country'
-      ? String(row.destination_airport || '').trim() || row.destination_country
+      ? String(row.destination_airport || '').trim() ||
+        String(row.to_city || '').trim() ||
+        row.destination_country
       : row.to_city;
   return {
     id: row.id,
@@ -90,6 +115,8 @@ export function mapTrip(row) {
     destinationCountryCode: row.destination_country_code,
     destinationAirport: row.destination_airport,
     travelDate: formatDateOnly(row.travel_date),
+    departureTime: formatTimeOnly(row.departure_time),
+    travelMethod: row.travel_method || null,
     luggageCapacityKg: Number.isFinite(Number(row.luggage_capacity_kg))
       ? Number(row.luggage_capacity_kg)
       : null,
@@ -123,12 +150,22 @@ function validatePayload(body) {
   }
 
   const flightNumber = String(body.flightNumber ?? '').trim() || null;
+  const departureTime = formatTimeOnly(body.departureTime);
+  const travelMethodRaw = String(body.travelMethod ?? '')
+    .trim()
+    .toLowerCase();
+  const travelMethod =
+    travelMethodRaw === 'air' || travelMethodRaw === 'land'
+      ? travelMethodRaw
+      : null;
 
   const base = {
     tripType,
     travelDate,
     luggageCapacityKg,
     flightNumber,
+    departureTime,
+    travelMethod,
     fromCity: null,
     fromCode: null,
     toCity: null,
@@ -196,14 +233,59 @@ function validatePayload(body) {
     );
   }
 
+  const originAirport = String(body.originAirport ?? '').trim() || null;
+  const destinationAirport = String(body.destinationAirport ?? '').trim() || null;
+  const fromCity = String(body.fromCity ?? '').trim() || null;
+  const toCity = String(body.toCity ?? '').trim() || null;
+
+  if (!originAirport && !fromCity) {
+    throw new AppError(
+      'Select an origin airport or city',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+  if (!destinationAirport && !toCity) {
+    throw new AppError(
+      'Select a destination airport or city',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const usesCityEndpoint = Boolean(fromCity || toCity);
+  if (usesCityEndpoint && !travelMethod) {
+    throw new AppError(
+      'travelMethod must be air or land when using city endpoints',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  if (!departureTime) {
+    throw new AppError(
+      'departureTime is required for country-to-country trips',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const resolvedMethod = travelMethod || 'air';
+  const resolvedFlightNumber = resolvedMethod === 'air' ? flightNumber : null;
+
   return {
     ...base,
     originCountry,
     originCountryCode,
-    originAirport: String(body.originAirport ?? '').trim() || null,
+    originAirport: fromCity ? null : originAirport,
     destinationCountry,
     destinationCountryCode,
-    destinationAirport: String(body.destinationAirport ?? '').trim() || null,
+    destinationAirport: toCity ? null : destinationAirport,
+    fromCity: originAirport && !fromCity ? null : fromCity,
+    toCity: destinationAirport && !toCity ? null : toCity,
+    travelMethod: resolvedMethod,
+    flightNumber: resolvedFlightNumber,
+    departureTime,
   };
 }
 

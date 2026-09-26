@@ -17,7 +17,8 @@ export async function createDeliveryWithPhotos({ delivery, photos }) {
         travel_date, parcel_category, parcel_size, weight_kg, max_budget,
         description, preferred_meetup_locations, acknowledged,
         platform_fee, platform_fee_share,
-        receiver_email, receiver_phone, receiver_meetup_location
+        receiver_email, receiver_phone, receiver_meetup_location,
+        departure_time, travel_method, flight_number
       ) VALUES (
         $1, $2, $3,
         $4, $5, $6, $7,
@@ -25,7 +26,8 @@ export async function createDeliveryWithPhotos({ delivery, photos }) {
         $12, $13, $14, $15, $16,
         $17, $18::text[], $19,
         $20, $21,
-        $22, $23, $24
+        $22, $23, $24,
+        $25, $26, $27
       )
       RETURNING *`,
       [
@@ -53,6 +55,9 @@ export async function createDeliveryWithPhotos({ delivery, photos }) {
         delivery.receiverEmail,
         delivery.receiverPhone,
         delivery.receiverMeetupLocation,
+        delivery.departureTime ?? null,
+        delivery.travelMethod ?? null,
+        delivery.flightNumber ?? null,
       ]
     );
 
@@ -534,6 +539,13 @@ export async function updateDeliveryForSender(deliveryId, senderId, deliveryType
            origin_airport = $16,
            destination_country = $17,
            destination_airport = $18,
+           from_city = $19,
+           to_city = $20,
+           from_code = $21,
+           to_code = $22,
+           departure_time = $23,
+           travel_method = $24,
+           flight_number = $25,
            updated_at = NOW()
        WHERE id = $1
          AND sender_id = $2
@@ -558,6 +570,13 @@ export async function updateDeliveryForSender(deliveryId, senderId, deliveryType
         fields.originAirport,
         fields.destinationCountry,
         fields.destinationAirport,
+        fields.fromCity ?? null,
+        fields.toCity ?? null,
+        fields.fromCode ?? null,
+        fields.toCode ?? null,
+        fields.departureTime ?? null,
+        fields.travelMethod ?? null,
+        fields.flightNumber ?? null,
       ]
     );
     return rows[0] || null;

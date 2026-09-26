@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL } from '../utils/trip_dates.js';
 
 export async function createTrip(trip) {
   const { rows } = await pool.query(
@@ -7,13 +8,15 @@ export async function createTrip(trip) {
       from_city, from_code, to_city, to_code,
       origin_country, origin_country_code, origin_airport,
       destination_country, destination_country_code, destination_airport,
-      travel_date, luggage_capacity_kg, flight_number
+      travel_date, luggage_capacity_kg, flight_number,
+      departure_time, travel_method
     ) VALUES (
       $1, $2, $3, $4,
       $5, $6, $7, $8,
       $9, $10, $11,
       $12, $13, $14,
-      $15, $16, $17
+      $15, $16, $17,
+      $18, $19
     )
     RETURNING *`,
     [
@@ -34,6 +37,8 @@ export async function createTrip(trip) {
       trip.travelDate,
       trip.luggageCapacityKg,
       trip.flightNumber,
+      trip.departureTime,
+      trip.travelMethod,
     ]
   );
   return rows[0];
@@ -137,6 +142,10 @@ export async function updateTripForTraveler(tripId, travelerId, tripType, fields
            destination_country = $9,
            destination_country_code = $10,
            destination_airport = $11,
+           from_city = $12,
+           to_city = $13,
+           departure_time = $14,
+           travel_method = $15,
            updated_at = NOW()
        WHERE id = $1
          AND traveler_id = $2
@@ -154,6 +163,10 @@ export async function updateTripForTraveler(tripId, travelerId, tripType, fields
         fields.destinationCountry,
         fields.destinationCountryCode,
         fields.destinationAirport,
+        fields.fromCity,
+        fields.toCity,
+        fields.departureTime,
+        fields.travelMethod,
       ]
     );
     return rows[0] || null;
@@ -168,6 +181,8 @@ export async function updateTripForTraveler(tripId, travelerId, tripType, fields
          from_code = $7,
          to_city = $8,
          to_code = $9,
+         departure_time = $10,
+         travel_method = $11,
          updated_at = NOW()
      WHERE id = $1
        AND traveler_id = $2
@@ -183,6 +198,8 @@ export async function updateTripForTraveler(tripId, travelerId, tripType, fields
       fields.fromCode,
       fields.toCity,
       fields.toCode,
+      fields.departureTime ?? null,
+      fields.travelMethod ?? null,
     ]
   );
   return rows[0] || null;
@@ -238,11 +255,8 @@ export async function countMatchingRequestsForTrip(tripId) {
 }
 
 /**
- * Open trips that may match a delivery destination (broad SQL prefilter).
- * Final destination equality is enforced in matching.service.js.
- *
- * City-to-city: prefilter by to_city label only (to_code is country ISO, not a city key).
- * Country-to-country: prefilter by destination_country_code (case-insensitive) OR country label.
+ * Open trips discoverable by senders within the active travel-date window
+ * (previous 5 days, today, and next 7 days).
  */
 export async function listOpenTripsForDiscover({ limit = 50, offset = 0, tripType } = {}) {
   const params = [limit, offset];
@@ -261,8 +275,9 @@ export async function listOpenTripsForDiscover({ limit = 50, offset = 0, tripTyp
      FROM trips t
      INNER JOIN users u ON u.id = t.traveler_id
      WHERE t.status = 'open_bid'
+       AND ${TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL}
        ${typeClause}
-     ORDER BY t.created_at DESC
+     ORDER BY t.travel_date ASC, t.created_at DESC
      LIMIT $1 OFFSET $2`,
     params
   );
@@ -304,10 +319,19 @@ export async function findDiscoverableTripByPublicId(publicId) {
   return rows[0] || null;
 }
 
+/**
+ * Open trips that may match a delivery destination (broad SQL prefilter).
+ * Final destination equality is enforced in matching.service.js.
+ * Only trips within the active travel-date window are returned.
+ *
+ * City-to-city: prefilter by to_city label only (to_code is country ISO, not a city key).
+ * Country-to-country: prefilter by destination_country_code (case-insensitive) OR country label.
+ */
 export async function listOpenTripsForDestinationMatch({
   tripType,
   destinationLabel,
   destinationCode,
+  destinationCityHint,
   excludeTravelerId,
   limit = 100,
 } = {}) {
@@ -319,6 +343,11 @@ export async function listOpenTripsForDestinationMatch({
   const searchLabel = cityHead || label;
   const code = String(destinationCode ?? '').trim().toUpperCase();
   const codeUsable = code && code !== 'XX' ? code : '';
+  const cityHint = String(destinationCityHint ?? '')
+    .trim()
+    .toLowerCase()
+    .split(',')[0]
+    .trim();
 
   const { rows } = await pool.query(
     `SELECT t.*,
@@ -330,6 +359,7 @@ export async function listOpenTripsForDestinationMatch({
      INNER JOIN users u ON u.id = t.traveler_id
      WHERE t.status = 'open_bid'
        AND ($2::uuid IS NULL OR t.traveler_id <> $2::uuid)
+       AND ${TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL}
        AND (
          (
            -- Same posting type + destination label/code (legacy path).
@@ -363,12 +393,22 @@ export async function listOpenTripsForDestinationMatch({
                      OR $4 LIKE '%' || LOWER(COALESCE(t.destination_country, '')) || '%'
                    )
                  )
+                 OR (
+                   -- Land C2C trips: city endpoint in the destination airport city.
+                   $7 <> ''
+                   AND (
+                     LOWER(COALESCE(t.to_city, '')) = $7
+                     OR LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) = $7
+                     OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $7 || '%'
+                   )
+                 )
                )
              )
            )
          )
          OR (
-           -- Country parcel: also consider city trips that end in that country.
+           -- Country parcel: also consider city trips that end in that country
+           -- or in the sender destination airport's city.
            $1 = 'country_to_country'
            AND t.trip_type = 'city_to_city'
            AND (
@@ -376,6 +416,14 @@ export async function listOpenTripsForDestinationMatch({
              OR (
                $4 <> ''
                AND LOWER(COALESCE(t.to_city, '')) LIKE '%' || $4 || '%'
+             )
+             OR (
+               $7 <> ''
+               AND (
+                 LOWER(COALESCE(t.to_city, '')) = $7
+                 OR LOWER(split_part(COALESCE(t.to_city, ''), ',', 1)) = $7
+                 OR LOWER(COALESCE(t.to_city, '')) LIKE '%' || $7 || '%'
+               )
              )
            )
          )
@@ -398,7 +446,15 @@ export async function listOpenTripsForDestinationMatch({
        )
      ORDER BY t.travel_date ASC, t.created_at DESC
      LIMIT $6`,
-    [tripType, excludeTravelerId || null, codeUsable, label, searchLabel, limit]
+    [
+      tripType,
+      excludeTravelerId || null,
+      codeUsable,
+      label,
+      searchLabel,
+      limit,
+      cityHint,
+    ]
   );
   return rows;
 }

@@ -67,6 +67,12 @@ export const passwordLoginOtpVerifyValidators = [
     .withMessage('Enter the 6-digit code'),
 ];
 
+export const sessionLoginOtpVerifyValidators = [
+  body('code')
+    .isLength({ min: 6, max: 6 })
+    .withMessage('Enter the 6-digit code'),
+];
+
 export const forgotPasswordValidators = [
   body('contact').trim().notEmpty().withMessage('Contact is required'),
   body('method')
@@ -250,6 +256,24 @@ export const completePasswordLoginOtp = asyncHandler(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+export const getWeeklyLoginOtpStatus = asyncHandler(async (req, res) => {
+  const result = await authService.getWeeklyLoginOtpStatus(req.user.id);
+  res.json({ success: true, data: result });
+});
+
+export const sendAuthenticatedLoginOtp = asyncHandler(async (req, res) => {
+  const result = await authService.sendAuthenticatedLoginOtp(req.user.id);
+  res.json({ success: true, data: result });
+});
+
+export const verifyAuthenticatedLoginOtp = asyncHandler(async (req, res) => {
+  const result = await authService.verifyAuthenticatedLoginOtp(
+    req.user.id,
+    req.body.code
+  );
+  res.json({ success: true, data: result });
+});
+
 export const sendCrossVerificationOtp = asyncHandler(async (req, res) => {
   const result = await authService.sendCrossVerificationOtp(req.user.id, req.body);
   res.json({ success: true, data: result });
@@ -277,6 +301,11 @@ export const updateRole = asyncHandler(async (req, res) => {
 
 export const uploadAvatar = asyncHandler(async (req, res) => {
   const result = await authService.uploadUserAvatar(req.user.id, req.file);
+  res.json({ success: true, data: result });
+});
+
+export const deleteAvatar = asyncHandler(async (req, res) => {
+  const result = await authService.deleteUserAvatar(req.user.id);
   res.json({ success: true, data: result });
 });
 

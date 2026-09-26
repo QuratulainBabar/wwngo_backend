@@ -381,8 +381,9 @@ async function getPaymentIntentAmountCents(paymentIntentId) {
 
 /**
  * Stripe Pay Now must cover the full escrow + sender fee amount on card.
- * Confirms the PaymentIntent into the wallet only when it already covers
- * totalNeeded; otherwise opens a Payment Sheet for the full amount.
+ * Confirms the PaymentIntent into the wallet when provided; only opens another
+ * Payment Sheet for any remaining shortfall (never re-charges the full amount
+ * after a successful sheet payment already credited the wallet).
  */
 async function requireFullStripePayment({
   senderId,
@@ -392,28 +393,42 @@ async function requireFullStripePayment({
 }) {
   const walletService = await import('./wallet.service.js');
 
+  let creditedFromIntent = 0;
   if (paymentIntentId) {
     await walletService.confirmTopUp(senderId, paymentIntentId);
-    const paidCents = await getPaymentIntentAmountCents(paymentIntentId);
-    if (paidCents >= totalNeeded) {
+    creditedFromIntent = await getPaymentIntentAmountCents(paymentIntentId);
+    if (creditedFromIntent >= totalNeeded) {
       return paymentIntentId;
     }
+  }
+
+  // Pay Now sheet already landed funds in the wallet — do not open the sheet
+  // again when available balance covers escrow + sender fee.
+  const wallet = await walletRepo.getWallet(senderId);
+  const available = Number(wallet.available_cents);
+  if (available >= totalNeeded) {
+    return paymentIntentId || null;
+  }
+
+  const shortfall = totalNeeded - available;
+  if (shortfall <= 0) {
+    return paymentIntentId || null;
   }
 
   if (stripeService.isConfigured()) {
     const payment = await createEscrowShortfallIntent(
       senderId,
-      totalNeeded,
+      shortfall,
       deliveryPublicId
     );
     throw new AppError(
-      'Complete card payment for the full escrow and fee amount.',
+      'Complete card payment for the remaining escrow and fee amount.',
       402,
       'PAYMENT_REQUIRED',
       {
         paymentIntentId: payment.paymentIntentId,
         clientSecret: payment.clientSecret,
-        amountCents: totalNeeded,
+        amountCents: shortfall,
         role: 'sender',
         purpose: 'escrow_shortfall',
         shipmentId: deliveryPublicId,
@@ -421,13 +436,13 @@ async function requireFullStripePayment({
     );
   }
 
-  // Dev / mock mode: invent card funds for the full amount (no Stripe keys).
+  // Dev / mock mode: invent card funds for the remaining shortfall (no Stripe keys).
   await walletRepo.appendLedgerEntry({
     userId: senderId,
     role: 'sender',
     type: 'top_up',
-    amountCents: totalNeeded,
-    availableDeltaCents: totalNeeded,
+    amountCents: shortfall,
+    availableDeltaCents: shortfall,
     description: 'Card fallback for escrow',
     shipmentId: deliveryPublicId,
     hiddenFromHistory: true,
@@ -461,13 +476,18 @@ async function chargeBookingPlatformFees({ delivery, deliveryPublicId }) {
   }
 
   const travelerFee = travelerPlatformFeeCents(category);
-  const travelerAlreadyPaid = await travelerHandoffAlreadyPaid(travelerId, deliveryPublicId);
-  if (!travelerAlreadyPaid && travelerFee > 0) {
+  const travelerAlreadyPaidCents = await netPlatformFeeCentsForUser(
+    travelerId,
+    'traveler',
+    deliveryPublicId
+  );
+  const travelerDue = Math.max(0, travelerFee - travelerAlreadyPaidCents);
+  if (travelerDue > 0) {
     try {
       await chargeWalletOrCard({
         userId: travelerId,
         role: 'traveler',
-        amountCents: travelerFee,
+        amountCents: travelerDue,
         description: platformFeeDescription(deliveryPublicId),
         shipmentId: deliveryPublicId,
         allowPaymentRequired: false,
@@ -694,10 +714,31 @@ export async function freezeEscrowForDelivery(deliveryPublicId) {
 }
 
 async function travelerHandoffAlreadyPaid(travelerId, deliveryPublicId) {
-  return (
-    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Platform fee')) ||
-    (await hasPlatformFeePaid(travelerId, 'traveler', deliveryPublicId, 'Handoff fee'))
+  // Require the full traveler fee ($3). A prior undercharge (e.g. old $2
+  // Document rate) must not count as paid.
+  const expected = travelerPlatformFeeCents();
+  const net = await netPlatformFeeCentsForUser(travelerId, 'traveler', deliveryPublicId);
+  return net >= expected;
+}
+
+async function netPlatformFeeCentsForUser(userId, role, shipmentId) {
+  const { rows } = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN type = 'platform_fee' THEN amount_cents ELSE 0 END), 0) AS charged_cents,
+       COALESCE(SUM(
+         CASE
+           WHEN type = 'refund'
+             AND (description ILIKE '%platform fee%' OR description ILIKE '%handoff fee%')
+           THEN amount_cents
+           ELSE 0
+         END
+       ), 0) AS refunded_cents
+     FROM wallet_ledger
+     WHERE user_id = $1 AND role = $2 AND shipment_id = $3`,
+    [userId, role, shipmentId]
   );
+  const row = rows[0] || {};
+  return Number(row.charged_cents) - Number(row.refunded_cents);
 }
 
 /**
@@ -717,9 +758,17 @@ export async function assertTravelerCanPayHandoffFee(
   if (await travelerHandoffAlreadyPaid(travelerId, deliveryPublicId)) return;
 
   const feeCents = travelerHandoffFeeCents(parcelCategory);
+  const alreadyPaidCents = await netPlatformFeeCentsForUser(
+    travelerId,
+    'traveler',
+    deliveryPublicId
+  );
+  const dueCents = Math.max(0, feeCents - alreadyPaidCents);
+  if (dueCents <= 0) return;
+
   const wallet = await walletRepo.getWallet(travelerId);
   const available = Number(wallet.available_cents);
-  const shortfall = feeCents - available;
+  const shortfall = dueCents - available;
   if (shortfall <= 0) return;
 
   if (!stripeService.isConfigured()) return;
@@ -745,7 +794,7 @@ export async function assertTravelerCanPayHandoffFee(
 }
 
 /**
- * Traveler platform fee ($2 documents / $4 objects).
+ * Traveler platform fee ($3 Document and Object).
  * Normally collected at Pay Now; kept as an idempotent safety net at NFC CP1.
  * Safe to call again (skips if already paid).
  */
@@ -766,13 +815,22 @@ export async function chargeTravelerHandoffFee(
   }
 
   const feeCents = travelerHandoffFeeCents(parcelCategory);
+  const alreadyPaidCents = await netPlatformFeeCentsForUser(
+    travelerId,
+    'traveler',
+    deliveryPublicId
+  );
+  const dueCents = Math.max(0, feeCents - alreadyPaidCents);
+  if (dueCents <= 0) {
+    return { charged: false, reason: 'already_paid' };
+  }
   await chargeWalletOrCard({
     userId: travelerId,
     role: 'traveler',
-    amountCents: feeCents,
+    amountCents: dueCents,
     description: platformFeeDescription(deliveryPublicId),
     shipmentId: deliveryPublicId,
     allowPaymentRequired,
   });
-  return { charged: true, feeCents };
+  return { charged: true, feeCents: dueCents };
 }

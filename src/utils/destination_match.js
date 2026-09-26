@@ -5,9 +5,12 @@
  *
  * City-to-city: compare destination city labels (to_city).
  *   to_code is a country ISO — it must NOT be used as a city match key.
- * Country-to-country: compare destination country ISO codes and/or names.
+ * Country-to-country (air): compare destination country ISO codes and/or names.
+ * Country-to-country (land): traveler To city must match the city of the
+ *   sender's selected destination airport (air + land both eligible).
  * Cross-type is allowed when ISO codes agree (e.g. country parcel CZ ↔
- * city trip ending in CZ / "Prague, Czechia").
+ * city trip ending in CZ / "Prague, Czechia") — for land city trips that
+ * city must still match the airport city when the delivery is airport-based.
  */
 
 /** Common official / colloquial country name variants → canonical key. */
@@ -87,6 +90,43 @@ export function placeHead(value) {
 }
 
 /**
+ * Best-effort city name from an airport / Places label.
+ * Handles "Istanbul Airport (IST), Istanbul, Türkiye" → "Istanbul".
+ */
+export function cityFromAirportOrPlaceLabel(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+
+  const parts = raw
+    .split(/[,;|]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  // "Airport (CODE), City, Country" → City (parts[1])
+  // "Airport (CODE), District, City, Country" → City (second-to-last)
+  if (parts.length >= 4) {
+    return parts[parts.length - 2];
+  }
+  if (parts.length === 3) {
+    return parts[1];
+  }
+
+  // "City, Country" → City
+  if (parts.length === 2) {
+    const first = parts[0].replace(/\([^)]*\)/g, '').trim();
+    if (!/\bairport\b/i.test(first)) return first;
+  }
+
+  // Single segment: strip IATA + "airport" noise, keep remaining words.
+  const cleaned = raw
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(international|intl|airport|aeroport|aéroport)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || parts[0] || raw;
+}
+
+/**
  * True when two place labels refer to the same destination.
  * Uses exact equality, containment, country aliases, or matching city heads.
  */
@@ -122,8 +162,33 @@ function codesMatch(a, b) {
 }
 
 function isCountryToCountry(row) {
-  const type = row?.delivery_type || row?.deliveryType || row?.trip_type || row?.tripType;
+  const type =
+    row?.delivery_type || row?.deliveryType || row?.trip_type || row?.tripType;
   return type === 'country_to_country';
+}
+
+function travelMethodOf(row) {
+  return String(row?.travel_method || row?.travelMethod || '')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Land traveler: explicit method, city endpoints without airport, or city-to-city.
+ */
+export function isLandTravelerTrip(trip) {
+  const method = travelMethodOf(trip);
+  if (method === 'land') return true;
+  if (method === 'air') return false;
+
+  const toCity = String(trip?.to_city || trip?.toCity || '').trim();
+  const destAirport = String(
+    trip?.destination_airport || trip?.destinationAirport || ''
+  ).trim();
+  if (toCity && !destAirport) return true;
+
+  const type = trip?.trip_type || trip?.tripType;
+  return type === 'city_to_city';
 }
 
 /**
@@ -170,16 +235,58 @@ export function tripDestination(trip) {
   };
 }
 
+export function senderDestinationAirportCity(delivery) {
+  // Prefer explicit airport-city (stored in to_city / destinationCity) over
+  // re-parsing Google Places airport labels, which often put a district in
+  // the second comma segment (e.g. "…, Tayakadin, Istanbul, Türkiye").
+  const explicit =
+    delivery.to_city ||
+    delivery.toCity ||
+    delivery.destination_city ||
+    delivery.destinationCity ||
+    '';
+  if (String(explicit).trim()) {
+    return (
+      cityFromAirportOrPlaceLabel(explicit) ||
+      placeHead(explicit) ||
+      String(explicit).trim()
+    );
+  }
+  const airport =
+    delivery.destination_airport || delivery.destinationAirport || '';
+  return cityFromAirportOrPlaceLabel(airport);
+}
+
+function travelerDestinationCity(trip) {
+  const toCity = trip.to_city || trip.toCity || '';
+  if (toCity) return toCity;
+  const airport =
+    trip.destination_airport || trip.destinationAirport || '';
+  return cityFromAirportOrPlaceLabel(airport) || tripDestination(trip).label;
+}
+
 /**
  * Hard filter: traveler To must match sender To (city or country as applicable).
- * Same corridor may be posted as country-to-country (airports) or city-to-city;
- * ISO code agreement or label/alias match is enough.
+ *
+ * Country-to-country sender deliveries match:
+ * - air travelers on the same destination country / airport corridor
+ * - land travelers whose To city is the city of the sender's destination airport
  */
 export function destinationsMatch(delivery, trip) {
   const senderTo = deliveryDestination(delivery);
   const travelerTo = tripDestination(trip);
 
-  // Shared destination country ISO (country parcel ↔ city trip in that country).
+  // Country parcel + land traveler → airport city ↔ traveler To city.
+  if (isCountryToCountry(delivery) && isLandTravelerTrip(trip)) {
+    const senderCity = senderDestinationAirportCity(delivery);
+    const travelerCity = travelerDestinationCity(trip);
+    if (senderCity && travelerCity && placesMatch(senderCity, travelerCity)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Shared destination country ISO (country parcel ↔ air country trip).
   if (codesMatch(senderTo.code, travelerTo.code)) {
     if (isCountryToCountry(delivery) || isCountryToCountry(trip)) {
       return true;

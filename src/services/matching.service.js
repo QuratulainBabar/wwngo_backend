@@ -2,9 +2,11 @@ import { AppError } from '../utils/errors.js';
 import * as deliveryRepository from '../repositories/delivery.repository.js';
 import * as tripRepository from '../repositories/trip.repository.js';
 import {
+  cityFromAirportOrPlaceLabel,
   deliveryDestination,
   destinationsMatch,
   placesMatch,
+  senderDestinationAirportCity,
 } from '../utils/destination_match.js';
 import { tripCanCarryParcelWeight } from '../utils/luggage_capacity.js';
 import { mapTrip } from './trip.service.js';
@@ -35,20 +37,26 @@ function dateProximityBonus(tripDate, deliveryDate) {
 
 function originLabel(delivery) {
   if (delivery.delivery_type === 'country_to_country') {
-    return delivery.origin_country || '';
+    return (
+      delivery.origin_airport ||
+      delivery.from_city ||
+      delivery.origin_country ||
+      ''
+    );
   }
   return delivery.from_city || '';
 }
 
 function tripOriginLabel(trip) {
   if (trip.trip_type === 'country_to_country') {
-    return trip.origin_country || '';
+    return trip.origin_airport || trip.from_city || trip.origin_country || '';
   }
   return trip.from_city || '';
 }
 
 /**
  * Score after destination hard-filter. Destination mismatch → never scored.
+ * Same travel method (air/land) gets a small ranking boost when both sides set it.
  */
 function matchScore(delivery, trip) {
   if (!destinationsMatch(delivery, trip)) return 0;
@@ -56,11 +64,25 @@ function matchScore(delivery, trip) {
   const originScore = placesMatch(originLabel(delivery), tripOriginLabel(trip))
     ? 1
     : 0.35;
-  const base = Math.round(((originScore + 1) / 2) * 80);
+  let base = Math.round(((originScore + 1) / 2) * 80);
   const bonus = dateProximityBonus(
     formatDateOnly(trip.travel_date),
     formatDateOnly(delivery.travel_date)
   );
+
+  const deliveryMethod = String(delivery.travel_method || '')
+    .trim()
+    .toLowerCase();
+  const tripMethod = String(trip.travel_method || '')
+    .trim()
+    .toLowerCase();
+  if (
+    (deliveryMethod === 'air' || deliveryMethod === 'land') &&
+    deliveryMethod === tripMethod
+  ) {
+    base += 5;
+  }
+
   return Math.max(0, Math.min(100, base + bonus));
 }
 
@@ -92,10 +114,13 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
  * Count is dynamic: every open trip that matches is returned (1, 2, 3, …).
  * City-to-city compares to_city labels (including city-head forms like
  * "Paris, France" ↔ "Paris, Île-de-France, France");
- * country-to-country compares country codes/names (including aliases like
- * Czechia ↔ Czech Republic).
- * Cross-type matches are included when the destination country ISO agrees
- * (country parcel ↔ city trip ending in that country).
+ * country-to-country air compares country codes/names (including aliases like
+ * Czechia ↔ Czech Republic);
+ * country-to-country land matches the traveler To city to the city of the
+ * sender's selected destination airport.
+ * Air and land trips are matched independently — an eligible air trip and an
+ * eligible land trip both appear (including two trips from the same traveler).
+ * Cross-type matches are included when destination rules above agree.
  *
  * Own trips are excluded so sender, traveler, and receiver stay on separate
  * Gmail accounts — the sender cannot match their own traveler trip.
@@ -110,10 +135,16 @@ export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
     );
   }
   const dest = deliveryDestination(delivery);
+  const destinationCityHint =
+    senderDestinationAirportCity(delivery) ||
+    cityFromAirportOrPlaceLabel(
+      delivery.destination_airport || delivery.to_city || ''
+    );
   const candidates = await tripRepository.listOpenTripsForDestinationMatch({
     tripType: delivery.delivery_type,
     destinationLabel: dest.label,
     destinationCode: dest.code,
+    destinationCityHint,
     excludeTravelerId: senderId,
     limit: 100,
   });
@@ -140,8 +171,14 @@ export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
       reviewCount: mapped.travelerReviewCount ?? 0,
       bio: mapped.travelerBio || null,
       travelDate: mapped.travelDate,
+      departureTime: mapped.departureTime,
+      travelMethod: mapped.travelMethod,
       origin: mapped.origin,
       destination: mapped.destination,
+      originAirport: mapped.originAirport,
+      destinationAirport: mapped.destinationAirport,
+      fromCity: mapped.fromCity,
+      toCity: mapped.toCity,
       route: mapped.route,
       luggageCapacityKg: mapped.luggageCapacityKg,
       flightNumber: mapped.flightNumber,

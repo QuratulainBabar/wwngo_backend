@@ -4,6 +4,9 @@ export const MIN_WALLET_SENDER_CENTS = 200; // $2
 export const MIN_WALLET_RECEIVER_CENTS = 200; // $2
 export const MIN_WALLET_TRAVELER_CENTS = 300; // $3
 
+/** Traveler platform fee — always $3 for Document and Object. */
+export const TRAVELER_PLATFORM_FEE_CENTS = 300;
+
 export const MAX_TRAVELER_REQUESTS_PER_DELIVERY = 2;
 export const MAX_MEETUP_LOCATIONS = 3;
 
@@ -40,17 +43,17 @@ export function resolvePlatformFees(parcelCategory, paysReceiverFee = false) {
 }
 
 export function senderPlatformFeeCents(category, paysReceiverFee = false) {
-  const doc = isDocumentCategory(category);
-  if (paysReceiverFee) return doc ? 300 : 600;
-  return doc ? 200 : 400;
+  // Same for Document and Object: $2, or $3 when sender covers receiver fee.
+  if (paysReceiverFee) return 300;
+  return 200;
 }
 
 /**
  * Sender platform fee for a delivery row — uses stored platform_fee when valid,
  * otherwise recomputes from category + receiver-fee choice.
  *
- * Sender pays receiver fee: $3 documents / $6 objects.
- * Sender does not pay receiver fee: $2 documents / $4 objects.
+ * Sender pays receiver fee: $3 (Document and Object).
+ * Sender does not pay receiver fee: $2 (Document and Object).
  */
 export function resolveSenderPlatformFeeCents(delivery) {
   const paysReceiver = senderPaysReceiverFee(delivery);
@@ -63,11 +66,13 @@ export function resolveSenderPlatformFeeCents(delivery) {
 
 export function receiverPlatformFeeCents(category, paysReceiverFee = false) {
   if (paysReceiverFee) return 0;
-  return isDocumentCategory(category) ? 200 : 300;
+  // Same for Document and Object ($2).
+  return 200;
 }
 
-export function travelerPlatformFeeCents(category) {
-  return isDocumentCategory(category) ? 200 : 400;
+export function travelerPlatformFeeCents(_category) {
+  // Always $3 — Document and Object (category ignored).
+  return TRAVELER_PLATFORM_FEE_CENTS;
 }
 
 export function travelerHandoffFeeCents(category) {
@@ -83,7 +88,7 @@ export function minWalletCentsForRole(role) {
 
 /**
  * Minimum sender balance to post a delivery.
- * Must not use senderPlatformFeeCents — posting does not debit $2/$4/$3/$6.
+ * Must not use senderPlatformFeeCents — posting does not debit $2/$3.
  */
 export function minWalletCentsForSenderCreate(
   _parcelCategory = 'documents',

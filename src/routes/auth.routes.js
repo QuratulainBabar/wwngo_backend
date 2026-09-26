@@ -27,6 +27,23 @@ router.post(
   validate,
   authController.completePasswordLoginOtp
 );
+router.get(
+  '/login-otp/status',
+  authenticate,
+  authController.getWeeklyLoginOtpStatus
+);
+router.post(
+  '/login-otp/send',
+  authenticate,
+  authController.sendAuthenticatedLoginOtp
+);
+router.post(
+  '/login-otp/verify',
+  authenticate,
+  authController.sessionLoginOtpVerifyValidators,
+  validate,
+  authController.verifyAuthenticatedLoginOtp
+);
 router.post('/refresh', authController.refresh);
 router.post('/logout', authController.logout);
 router.get('/me', authenticate, authController.me);
@@ -47,6 +64,11 @@ router.post(
     });
   },
   authController.uploadAvatar
+);
+router.delete(
+  '/profile/avatar',
+  authenticate,
+  authController.deleteAvatar
 );
 router.post(
   '/role',
