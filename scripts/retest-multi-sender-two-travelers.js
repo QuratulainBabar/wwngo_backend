@@ -104,14 +104,14 @@ async function main() {
   console.log('');
   console.log('[C] Live link reachability');
   try {
-    const res = await fetch('https://wango.toolkitpro.cloud/api/v1/auth/login', {
+    const res = await fetch('http://192.168.1.8:3000/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'probe@example.com', password: 'x' }),
     });
     const json = await res.json();
     const ok = res.status === 401 || res.status === 400;
-    console.log(`  https://wango.toolkitpro.cloud/api/v1 → HTTP ${res.status}`);
+    console.log(`  http://192.168.1.8:3000/api/v1 → HTTP ${res.status}`);
     console.log(`  Response code: ${json?.error?.code || 'ok'}`);
     console.log(ok ? '  PASS: live API responds' : '  WARN: unexpected status');
   } catch (err) {

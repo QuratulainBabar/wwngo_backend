@@ -606,7 +606,7 @@ export async function startConnectOnboarding(userId, { returnPath = '/wallet', r
   }
 
   const configured = String(env.appPublicUrl || '').replace(/\/$/, '');
-  const base = configured || 'https://wango.toolkitpro.cloud';
+  const base = configured || 'http://192.168.1.8:3000';
   const returnUrl = `${base}/connect/return`;
   const roleQ = ['sender', 'traveler', 'receiver'].includes(String(role || ''))
     ? `&role=${role}`

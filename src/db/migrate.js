@@ -3,6 +3,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { pool } from './pool.js';
 
+
+
+
+
+
+
+// kkkk
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const migrationsDir = path.join(__dirname, 'migrations');
 
