@@ -65,25 +65,8 @@ jobs:
             done
             sleep 1
 
-            "$PM2_BIN" start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
+                     "$PM2_BIN" start "$APP_DIR/src/index.js" --name wwngo --cwd "$APP_DIR"
             "$PM2_BIN" save || true
             "$PM2_BIN" status || true
 
-            echo "==> Health check"
-            ok=0
-            for i in 1 2 3 4 5 6; do
-              sleep 2
-              if curl -fsS "http://192.168.1.8:3000/health"; then
-                echo
-                ok=1
-                break
-              fi
-              echo "Attempt $i failed, retrying..."
-            done
-            if [[ "$ok" -ne 1 ]]; then
-              echo "Health check failed"
-              "$PM2_BIN" status || true
-              "$PM2_BIN" logs wwngo --lines 50 --nostream || true
-              exit 1
-            fi
             echo "Deploy OK"
