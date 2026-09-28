@@ -10,7 +10,7 @@ export function publishableKey() {
   return env.stripe?.publishableKey || null;
 }
 
-async function getStripe() {
+export async function getStripe() {
   if (!isConfigured()) return null;
   if (!stripe) {
     const mod = await import('stripe');
@@ -42,7 +42,8 @@ export async function createPaymentIntent({
   });
 }
 
-const SUPPORTED_CURRENCIES = new Set([
+/** App-supported ISO codes (lowercase). Used by Stripe charges and FX Quotes. */
+export const SUPPORTED_CURRENCIES = new Set([
   'usd',
   'eur',
   'gbp',
@@ -59,7 +60,13 @@ const SUPPORTED_CURRENCIES = new Set([
   'try',
 ]);
 
-function normalizeCurrency(currency) {
+export function isSupportedCurrency(currency) {
+  const code = String(currency || '').trim().toLowerCase();
+  return SUPPORTED_CURRENCIES.has(code);
+}
+
+/** Normalize for PaymentIntents / Transfers; unknown codes fall back to usd. */
+export function normalizeCurrency(currency) {
   const code = String(currency || 'usd').trim().toLowerCase();
   return SUPPORTED_CURRENCIES.has(code) ? code : 'usd';
 }

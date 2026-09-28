@@ -1,4 +1,5 @@
 import * as walletService from '../services/wallet.service.js';
+import * as fxService from '../services/fx.service.js';
 import { asyncHandler } from '../utils/errors.js';
 
 /**
@@ -92,6 +93,25 @@ export const startConnectOnboarding = asyncHandler(async (req, res) => {
   const data = await walletService.startConnectOnboarding(req.user.id, {
     returnPath: req.body.returnPath,
     role: req.body.role,
+  });
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /api/v1/wallet/fx/quote
+ * body: { fromCurrency|sourceCurrency, toCurrency|targetCurrency, amountCents, useBaseRate? }
+ * Live Stripe FX Quote (lock_duration=none) → converted amount for any supported pair.
+ */
+export const getFxQuote = asyncHandler(async (req, res) => {
+  const fromCurrency =
+    req.body.fromCurrency || req.body.sourceCurrency || req.body.from;
+  const toCurrency =
+    req.body.toCurrency || req.body.targetCurrency || req.body.to;
+  const data = await fxService.convertAmount({
+    fromCurrency,
+    toCurrency,
+    amountCents: req.body.amountCents,
+    useBaseRate: Boolean(req.body.useBaseRate),
   });
   res.json({ success: true, data });
 });

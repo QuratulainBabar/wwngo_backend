@@ -321,8 +321,12 @@ export async function findDiscoverableTripByPublicId(publicId) {
 
 /**
  * Open trips that may match a delivery destination (broad SQL prefilter).
- * Final destination equality is enforced in matching.service.js.
- * Only trips within the active travel-date window are returned.
+ * Final destination equality + luggage are enforced in matching.service.js.
+ *
+ * No travel-date window here — must stay identical to notifyMatchingSenders
+ * (destination + luggage only). Browse windows belong on discover/list UIs,
+ * not on match eligibility; otherwise notifications fire while the sender list
+ * stays empty for trips outside today±N days.
  *
  * City-to-city: prefilter by to_city label only (to_code is country ISO, not a city key).
  * Country-to-country: prefilter by destination_country_code (case-insensitive) OR country label.
@@ -359,7 +363,6 @@ export async function listOpenTripsForDestinationMatch({
      INNER JOIN users u ON u.id = t.traveler_id
      WHERE t.status = 'open_bid'
        AND ($2::uuid IS NULL OR t.traveler_id <> $2::uuid)
-       AND ${TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL}
        AND (
          (
            -- Same posting type + destination label/code (legacy path).

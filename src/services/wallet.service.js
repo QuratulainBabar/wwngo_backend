@@ -143,8 +143,8 @@ export async function grantKycWelcomeCredit(userId) {
  * Payment Sheet, then POST /wallet/top-up/confirm credits the ledger.
  */
 export async function topUp(userId, role, amountCents, currency = 'USD') {
-  const cents = Number(amountCents);
-  if (!Number.isInteger(cents) || cents <= 0) {
+  const displayCents = Number(amountCents);
+  if (!Number.isInteger(displayCents) || displayCents <= 0) {
     throw new AppError('Top-up amount must be a positive integer (cents)', 400, 'VALIDATION_ERROR');
   }
 
@@ -157,16 +157,60 @@ export async function topUp(userId, role, amountCents, currency = 'USD') {
     );
   }
 
-  return createTopUpPaymentIntent(userId, role, cents, currency);
+  // Ledger + Stripe charge are always USD. Convert any display currency via FX Quotes.
+  const displayCurrency = String(currency || 'USD').trim().toUpperCase() || 'USD';
+  let usdCents = displayCents;
+  let fxQuote = null;
+
+  if (displayCurrency !== 'USD') {
+    const fxService = await import('./fx.service.js');
+    fxQuote = await fxService.convertAmount({
+      fromCurrency: displayCurrency,
+      toCurrency: 'USD',
+      amountCents: displayCents,
+    });
+    usdCents = fxQuote.convertedAmountCents;
+  }
+
+  if (!Number.isInteger(usdCents) || usdCents <= 0) {
+    throw new AppError(
+      'Converted top-up amount must be a positive USD amount',
+      400,
+      'FX_AMOUNT_INVALID'
+    );
+  }
+
+  const payment = await createTopUpPaymentIntent(userId, role, usdCents, 'USD', {
+    displayCurrency,
+    displayAmountCents: displayCents,
+    exchangeRate: fxQuote?.exchangeRate ?? 1,
+    quoteId: fxQuote?.quoteId ?? null,
+  });
+
+  return {
+    ...payment,
+    displayCurrency,
+    displayAmountCents: displayCents,
+    exchangeRate: fxQuote?.exchangeRate ?? 1,
+    quoteId: fxQuote?.quoteId ?? null,
+  };
 }
 
 /**
  * Create Stripe PaymentIntent for wallet top-up; credits on webhook success.
+ * Payment currency is always USD (wallet ledger currency).
  */
-export async function createTopUpPaymentIntent(userId, role, amountCents, currency = 'USD') {
+export async function createTopUpPaymentIntent(
+  userId,
+  role,
+  amountCents,
+  currency = 'USD',
+  fxMeta = {}
+) {
   const stripeService = await import('./stripe.service.js');
   const { pool } = await import('../db/pool.js');
-  const currencyCode = String(currency || 'USD').trim().toUpperCase() || 'USD';
+  // Always charge USD — Stripe account presentment limits must not block top-ups.
+  const currencyCode = 'USD';
 
   let intent;
   try {
@@ -180,6 +224,10 @@ export async function createTopUpPaymentIntent(userId, role, amountCents, curren
         role,
         amountCents: String(amountCents),
         currency: currencyCode,
+        displayCurrency: String(fxMeta.displayCurrency || 'USD'),
+        displayAmountCents: String(fxMeta.displayAmountCents ?? amountCents),
+        exchangeRate: String(fxMeta.exchangeRate ?? 1),
+        quoteId: fxMeta.quoteId ? String(fxMeta.quoteId) : '',
       },
     });
   } catch (err) {

@@ -2,8 +2,22 @@ import { Router } from 'express';
 import { body, param, query } from 'express-validator';
 import * as walletController from '../controllers/wallet.controller.js';
 import { authenticate, validate } from '../middleware/auth.js';
+import { SUPPORTED_CURRENCIES } from '../services/stripe.service.js';
 
 const router = Router();
+
+const supportedCurrencyCodes = [...SUPPORTED_CURRENCIES].flatMap((c) => [
+  c,
+  c.toUpperCase(),
+]);
+
+const optionalCurrencyBody = (field) =>
+  body(field)
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes)
+    .withMessage('currency must be a supported ISO code');
 
 const roleQuery = query('role')
   .optional()
@@ -22,6 +36,57 @@ const amountCentsBody = body('amountCents')
 router.use(authenticate);
 
 router.get('/payments/config', walletController.getPaymentsConfig);
+
+router.post(
+  '/fx/quote',
+  body('amountCents')
+    .isInt({ min: 0 })
+    .withMessage('amountCents must be a non-negative integer'),
+  body('fromCurrency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('toCurrency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('sourceCurrency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('targetCurrency')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('from')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('to')
+    .optional()
+    .isString()
+    .trim()
+    .isIn(supportedCurrencyCodes),
+  body('useBaseRate').optional().isBoolean(),
+  body().custom((_, { req }) => {
+    const from =
+      req.body.fromCurrency || req.body.sourceCurrency || req.body.from;
+    const to = req.body.toCurrency || req.body.targetCurrency || req.body.to;
+    if (!from || !to) {
+      throw new Error(
+        'fromCurrency and toCurrency are required (aliases: sourceCurrency/targetCurrency)'
+      );
+    }
+    return true;
+  }),
+  validate,
+  walletController.getFxQuote
+);
 
 router.get('/', roleQuery, validate, walletController.getWallet);
 
@@ -49,41 +114,7 @@ router.post(
   '/top-up',
   roleBody,
   amountCentsBody,
-  body('currency')
-    .optional()
-    .isString()
-    .trim()
-    .isIn([
-      'USD',
-      'EUR',
-      'GBP',
-      'CAD',
-      'AUD',
-      'AED',
-      'SAR',
-      'QAR',
-      'KWD',
-      'BHD',
-      'OMR',
-      'INR',
-      'CNY',
-      'TRY',
-      'usd',
-      'eur',
-      'gbp',
-      'cad',
-      'aud',
-      'aed',
-      'sar',
-      'qar',
-      'kwd',
-      'bhd',
-      'omr',
-      'inr',
-      'cny',
-      'try',
-    ])
-    .withMessage('currency must be a supported ISO code'),
+  optionalCurrencyBody('currency'),
   validate,
   walletController.topUp
 );
@@ -99,41 +130,7 @@ router.post(
   '/withdraw',
   roleBody,
   amountCentsBody,
-  body('currency')
-    .optional()
-    .isString()
-    .trim()
-    .isIn([
-      'USD',
-      'EUR',
-      'GBP',
-      'CAD',
-      'AUD',
-      'AED',
-      'SAR',
-      'QAR',
-      'KWD',
-      'BHD',
-      'OMR',
-      'INR',
-      'CNY',
-      'TRY',
-      'usd',
-      'eur',
-      'gbp',
-      'cad',
-      'aud',
-      'aed',
-      'sar',
-      'qar',
-      'kwd',
-      'bhd',
-      'omr',
-      'inr',
-      'cny',
-      'try',
-    ])
-    .withMessage('currency must be a supported ISO code'),
+  optionalCurrencyBody('currency'),
   validate,
   walletController.withdraw
 );

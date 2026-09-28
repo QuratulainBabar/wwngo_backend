@@ -11,6 +11,15 @@ export const TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL = `(
   AND t.travel_date <= (CURRENT_DATE + INTERVAL '${TRIP_VISIBLE_FUTURE_DAYS} days')
 )`;
 
+/**
+ * SQL predicate for delivery↔trip matching historically excluded stale past
+ * trips. Matching no longer uses a travel-date window — keep this export for
+ * any admin/browse helpers that still want "not older than N days".
+ */
+export const TRIP_TRAVEL_DATE_NOT_STALE_SQL = `(
+  t.travel_date >= (CURRENT_DATE - INTERVAL '${TRIP_VISIBLE_PAST_DAYS} days')
+)`;
+
 function parseDateOnly(value) {
   if (value == null) return null;
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.slice(0, 10))) {
