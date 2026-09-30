@@ -119,6 +119,54 @@ export async function suspendUser(userId, { suspend = true } = {}) {
   return rows[0];
 }
 
+export async function deleteUser(userId, { actorId = null } = {}) {
+  const { rows: existingRows } = await pool.query(
+    `SELECT id, email, name, role, is_admin
+     FROM users
+     WHERE id::text = $1 OR LOWER(email) = LOWER($1)
+     LIMIT 1`,
+    [userId]
+  );
+  const existing = existingRows[0];
+  if (!existing) throw new AppError('User not found', 404, 'NOT_FOUND');
+  if (existing.is_admin) {
+    throw new AppError('Cannot delete an admin user', 400, 'VALIDATION_ERROR');
+  }
+  if (actorId && String(actorId) === String(existing.id)) {
+    throw new AppError('Cannot delete your own account via admin API', 400, 'VALIDATION_ERROR');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM otp_codes WHERE lower(contact) = lower($1)`,
+      [existing.email]
+    );
+    await client.query(
+      `UPDATE refresh_tokens
+          SET revoked_at = NOW()
+        WHERE user_id = $1 AND revoked_at IS NULL`,
+      [existing.id]
+    );
+    const { rows } = await client.query(
+      `DELETE FROM users WHERE id = $1 RETURNING id, email, name, role`,
+      [existing.id]
+    );
+    await client.query('COMMIT');
+    console.log(
+      `[admin] deleteUser by ${actorId || 'unknown'}:`,
+      rows[0]?.email
+    );
+    return rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 const USER_EDITABLE = {
   name: { type: 'string', max: 255 },
   email: { type: 'string', max: 255 },

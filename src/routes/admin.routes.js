@@ -66,6 +66,13 @@ router.post('/users/:id/unsuspend', asyncHandler(async (req, res) => {
   res.json({ success: true, data: { user } });
 }));
 
+router.delete('/users/:id', asyncHandler(async (req, res) => {
+  const user = await adminService.deleteUser(req.params.id, {
+    actorId: req.user.id,
+  });
+  res.json({ success: true, data: { user } });
+}));
+
 router.get('/escrows', asyncHandler(async (req, res) => {
   const escrows = await adminService.listEscrows({
     limit: Number(req.query.limit) || 50,
