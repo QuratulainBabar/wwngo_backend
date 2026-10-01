@@ -349,14 +349,30 @@ function receiverPhoneMatchSql(digitsParam, nationalParam) {
 `;
 }
 
-function receiverAccessSql(userIdParam, emailParam, digitsParam, nationalParam) {
+function receiverAccessSql(
+  userIdParam,
+  emailParam,
+  digitsParam,
+  nationalParam,
+  altEmailParam = null
+) {
   const phoneSql = receiverPhoneMatchSql(digitsParam, nationalParam);
+  const altEmailClause = altEmailParam
+    ? `
+    OR (
+      ${altEmailParam} <> ''
+      AND d.receiver_email IS NOT NULL
+      AND LOWER(TRIM(d.receiver_email)) = LOWER(TRIM(${altEmailParam}))
+    )`
+    : '';
   return `
     d.receiver_id = ${userIdParam}
     OR (
       d.receiver_email IS NOT NULL
-      AND LOWER(d.receiver_email) = LOWER(${emailParam})
+      AND ${emailParam} <> ''
+      AND LOWER(TRIM(d.receiver_email)) = LOWER(TRIM(${emailParam}))
     )
+    ${altEmailClause}
     OR (${phoneSql})
   `;
 }
@@ -368,10 +384,10 @@ export async function listDeliveriesForReceiver(
   userId,
   email,
   phone,
-  { limit = 50, offset = 0 } = {}
+  { limit = 50, offset = 0, altEmail = '' } = {}
 ) {
   const { digits, national } = phoneMatchParts(phone);
-  const access = receiverAccessSql('$1', '$2', '$3', '$4');
+  const access = receiverAccessSql('$1', '$2', '$3', '$4', '$5');
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
@@ -383,15 +399,21 @@ export async function listDeliveriesForReceiver(
      LEFT JOIN users r ON r.id = d.receiver_id
      WHERE ${access}
      ORDER BY d.created_at DESC
-     LIMIT $5 OFFSET $6`,
-    [userId, email || '', digits, national, limit, offset]
+     LIMIT $6 OFFSET $7`,
+    [userId, email || '', digits, national, altEmail || '', limit, offset]
   );
   return rows;
 }
 
-export async function findDeliveryByIdForReceiver(deliveryId, userId, email, phone) {
+export async function findDeliveryByIdForReceiver(
+  deliveryId,
+  userId,
+  email,
+  phone,
+  altEmail = ''
+) {
   const { digits, national } = phoneMatchParts(phone);
-  const access = receiverAccessSql('$2', '$3', '$4', '$5');
+  const access = receiverAccessSql('$2', '$3', '$4', '$5', '$6');
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
@@ -403,14 +425,20 @@ export async function findDeliveryByIdForReceiver(deliveryId, userId, email, pho
      LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.id = $1
        AND (${access})`,
-    [deliveryId, userId, email || '', digits, national]
+    [deliveryId, userId, email || '', digits, national, altEmail || '']
   );
   return rows[0] || null;
 }
 
-export async function findDeliveryByPublicIdForReceiver(publicId, userId, email, phone) {
+export async function findDeliveryByPublicIdForReceiver(
+  publicId,
+  userId,
+  email,
+  phone,
+  altEmail = ''
+) {
   const { digits, national } = phoneMatchParts(phone);
-  const access = receiverAccessSql('$2', '$3', '$4', '$5');
+  const access = receiverAccessSql('$2', '$3', '$4', '$5', '$6');
   const { rows } = await pool.query(
     `SELECT d.*,
             s.name AS sender_name,
@@ -422,7 +450,7 @@ export async function findDeliveryByPublicIdForReceiver(publicId, userId, email,
      LEFT JOIN users r ON r.id = d.receiver_id
      WHERE d.public_id = $1
        AND (${access})`,
-    [publicId, userId, email || '', digits, national]
+    [publicId, userId, email || '', digits, national, altEmail || '']
   );
   return rows[0] || null;
 }

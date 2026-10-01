@@ -1,20 +1,24 @@
 /**
- * Active traveler trip window shown to senders (rolling, relative to today):
- * previous 5 days + today + next 7 days.
+ * Travel-date windows for traveler trips.
+ *
+ * Discover / trip posting (relative to today):
+ *   previous 5 days + today + next 7 days.
+ *
+ * Matching Travelers (relative to the sender delivery travel date):
+ *   delivery − 5 days through delivery + 7 days (inclusive).
  */
 export const TRIP_VISIBLE_PAST_DAYS = 5;
 export const TRIP_VISIBLE_FUTURE_DAYS = 7;
 
-/** SQL predicate fragment: trip.travel_date within the active sender-visible window. */
+/** SQL predicate fragment: trip.travel_date within the today-relative discover window. */
 export const TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL = `(
   t.travel_date >= (CURRENT_DATE - INTERVAL '${TRIP_VISIBLE_PAST_DAYS} days')
   AND t.travel_date <= (CURRENT_DATE + INTERVAL '${TRIP_VISIBLE_FUTURE_DAYS} days')
 )`;
 
 /**
- * SQL predicate for delivery↔trip matching historically excluded stale past
- * trips. Matching no longer uses a travel-date window — keep this export for
- * any admin/browse helpers that still want "not older than N days".
+ * SQL predicate for "travel date not older than the past window start".
+ * Prefer TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL for discover lists.
  */
 export const TRIP_TRAVEL_DATE_NOT_STALE_SQL = `(
   t.travel_date >= (CURRENT_DATE - INTERVAL '${TRIP_VISIBLE_PAST_DAYS} days')
@@ -28,6 +32,13 @@ function parseDateOnly(value) {
   }
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return null;
+  // DATE / timestamptz-at-midnight from pg: prefer UTC calendar day.
+  if (
+    value instanceof Date ||
+    (typeof value === 'string' && /T|Z|[+-]\d{2}:?\d{2}$/.test(value))
+  ) {
+    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  }
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
@@ -38,7 +49,7 @@ function formatDateOnly(date) {
   return `${y}-${m}-${day}`;
 }
 
-/** Inclusive YYYY-MM-DD bounds for the active trip window. */
+/** Inclusive YYYY-MM-DD bounds for the today-relative discover / posting window. */
 export function activeTripTravelDateBounds(now = new Date()) {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const start = new Date(today);
@@ -51,7 +62,24 @@ export function activeTripTravelDateBounds(now = new Date()) {
   };
 }
 
-/** True when travelDate (YYYY-MM-DD or Date) is within the active sender-visible window. */
+/**
+ * Inclusive YYYY-MM-DD bounds for Matching Travelers relative to a delivery
+ * travel date: delivery − pastDays … delivery + futureDays.
+ */
+export function matchingTripTravelDateBounds(deliveryTravelDate) {
+  const anchor = parseDateOnly(deliveryTravelDate);
+  if (!anchor) return activeTripTravelDateBounds();
+  const start = new Date(anchor);
+  start.setDate(start.getDate() - TRIP_VISIBLE_PAST_DAYS);
+  const end = new Date(anchor);
+  end.setDate(end.getDate() + TRIP_VISIBLE_FUTURE_DAYS);
+  return {
+    startDate: formatDateOnly(start),
+    endDate: formatDateOnly(end),
+  };
+}
+
+/** True when travelDate falls in the today-relative discover / posting window. */
 export function isTravelDateInActiveTripWindow(travelDate, now = new Date()) {
   const tripDay = parseDateOnly(travelDate);
   if (!tripDay) return false;
@@ -62,8 +90,20 @@ export function isTravelDateInActiveTripWindow(travelDate, now = new Date()) {
 }
 
 /**
- * Assert travelDate is YYYY-MM-DD and within the active window.
- * @throws {{ message: string, code: string }} shape compatible with AppError usage via caller
+ * True when tripTravelDate falls in the matching window for deliveryTravelDate
+ * (delivery − 5 … delivery + 7 inclusive).
+ */
+export function isTravelDateInMatchingWindow(tripTravelDate, deliveryTravelDate) {
+  const tripDay = parseDateOnly(tripTravelDate);
+  if (!tripDay) return false;
+  const { startDate, endDate } = matchingTripTravelDateBounds(deliveryTravelDate);
+  const start = parseDateOnly(startDate);
+  const end = parseDateOnly(endDate);
+  return tripDay.getTime() >= start.getTime() && tripDay.getTime() <= end.getTime();
+}
+
+/**
+ * Assert travelDate is YYYY-MM-DD and within the today-relative posting window.
  */
 export function assertTravelDateInActiveTripWindow(travelDateStr) {
   const bounds = activeTripTravelDateBounds();

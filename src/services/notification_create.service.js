@@ -2,9 +2,12 @@ import * as notificationRepository from '../repositories/notification.repository
 import { publish } from './notification_hub.js';
 import { mapNotification } from './notification.service.js';
 import { sendPushToUser } from './fcm.service.js';
+import { localizePushForUser } from '../i18n/notification_i18n.js';
 
 /**
  * Persist a notification and push it to any connected SSE clients.
+ * Inbox rows stay English (client translates). FCM system tray uses the
+ * recipient's preferred_language so background/closed alerts are localized.
  */
 export async function createNotification({
   userId,
@@ -45,11 +48,22 @@ export async function createNotification({
     unreadCount,
   });
 
-  void sendPushToUser(normalizedUserId, {
-    title,
-    body,
-    data: { type, route: route || '', notificationId: notification.id },
-  }).catch(() => {});
+  void (async () => {
+    const localized = await localizePushForUser(normalizedUserId, {
+      title,
+      body,
+    });
+    await sendPushToUser(normalizedUserId, {
+      title: localized.title,
+      body: localized.body,
+      data: {
+        type,
+        route: route || '',
+        notificationId: notification.id,
+        language: localized.language,
+      },
+    });
+  })().catch(() => {});
 
   return notification;
 }

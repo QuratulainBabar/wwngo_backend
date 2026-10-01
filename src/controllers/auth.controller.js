@@ -314,6 +314,23 @@ export const registerFcmToken = asyncHandler(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+export const updatePreferredLanguageValidators = [
+  body('preferredLanguage')
+    .trim()
+    .notEmpty()
+    .withMessage('preferredLanguage is required')
+    .isIn(['en', 'fr', 'es', 'it', 'nl', 'de', 'ar', 'hi', 'zh', 'tr', 'ru'])
+    .withMessage('Unsupported language'),
+];
+
+export const updatePreferredLanguage = asyncHandler(async (req, res) => {
+  const result = await authService.updatePreferredLanguage(
+    req.user.id,
+    req.body?.preferredLanguage
+  );
+  res.json({ success: true, data: result });
+});
+
 export const getSecurityLogs = asyncHandler(async (req, res) => {
   const result = await authService.getSecurityLogs(req.user.id);
   res.json({ success: true, data: result });

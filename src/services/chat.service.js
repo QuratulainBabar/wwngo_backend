@@ -255,18 +255,29 @@ async function notifyChatRecipient({
   if (recipientId === del.traveler_id) rolePath = 'traveler-chats';
   else if (recipientId === del.receiver_id) rolePath = 'receiver-chats';
 
-  const preview = isImage ? '📷 Photo' : String(text || '').trim();
-  const body =
-    preview.length > 140 ? `${preview.slice(0, 137)}...` : preview || 'New message';
+  const previewRaw = isImage ? '📷 Photo' : String(text || '').trim();
+  const previewFallback = previewRaw || 'New message';
+  const bodyEn =
+    previewFallback.length > 140
+      ? `${previewFallback.slice(0, 137)}...`
+      : previewFallback;
+
+  const { localizePushForUser } = await import('../i18n/notification_i18n.js');
+  // Keep the sender display name as-is; only localize system placeholders.
+  const localized = await localizePushForUser(recipientId, {
+    title: senderName,
+    body: bodyEn,
+  });
 
   await sendPushToUser(recipientId, {
-    title: senderName,
-    body,
+    title: localized.title,
+    body: localized.body,
     data: {
       type: 'chatMessage',
       route: `/${rolePath}/${conversation.id}`,
       conversationId: String(conversation.id),
       messageId: messageId != null ? String(messageId) : '',
+      language: localized.language,
     },
   });
 }

@@ -8,6 +8,7 @@ import {
   tripDestination,
 } from '../utils/destination_match.js';
 import { tripCanCarryParcelWeight } from '../utils/luggage_capacity.js';
+import { isTravelDateInMatchingWindow } from '../utils/trip_dates.js';
 
 const ALLOWED_TYPES = new Set(['city_to_city', 'country_to_country']);
 const TRAVELER_CANCEL_MIN_HOURS_BEFORE_TRAVEL = 24;
@@ -322,7 +323,8 @@ export async function createTrip(travelerId, body) {
 /**
  * When a traveler posts a trip, notify each sender whose open delivery
  * matches this trip (same rules as listMatchingTravelersForDelivery:
- * destination + luggage capacity; receiver already accepted).
+ * destination + luggage + delivery-relative travel-date window; receiver
+ * already accepted).
  */
 async function notifyMatchingSendersForNewTrip(tripRow) {
   const dest = tripDestination(tripRow);
@@ -338,6 +340,14 @@ async function notifyMatchingSendersForNewTrip(tripRow) {
   let notified = 0;
 
   for (const delivery of candidates) {
+    if (
+      !isTravelDateInMatchingWindow(
+        tripRow.travel_date,
+        delivery.travel_date
+      )
+    ) {
+      continue;
+    }
     if (!destinationsMatch(delivery, tripRow)) continue;
     if (
       !tripCanCarryParcelWeight(

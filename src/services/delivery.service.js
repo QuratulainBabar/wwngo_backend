@@ -10,6 +10,7 @@ import * as deliveryState from './delivery_state.service.js';
 import * as escrowService from './escrow.service.js';
 import { sendReceiverParcelRequestEmail } from './email.service.js';
 import { pool } from '../db/pool.js';
+import { normalizeEmail } from '../utils/otp.js';
 import {
   parsePaysReceiverFee,
   resolvePlatformFees,
@@ -744,9 +745,14 @@ async function loadSenderName(senderId) {
 
 async function resolveUserContact(user) {
   const contact = await loadUserContact(user.id);
+  const dbEmail = normalizeEmail(contact.email || '');
+  const jwtEmail = normalizeEmail(user.email || '');
+  // Prefer DB email, but keep JWT email as an alternate match so a stale
+  // profile email cannot hide deliveries addressed to the signed-in account.
   return {
-    email: contact.email || user.email || '',
-    phone: contact.phone || '',
+    email: dbEmail || jwtEmail,
+    altEmail: jwtEmail && jwtEmail !== dbEmail ? jwtEmail : '',
+    phone: String(contact.phone || '').trim(),
   };
 }
 
@@ -935,7 +941,7 @@ export async function listReceiverDeliveries(user, query = {}) {
     user.id,
     contact.email,
     contact.phone,
-    { limit, offset }
+    { limit, offset, altEmail: contact.altEmail }
   );
 
   // Heal missing in-app alerts for pending requests (older creates / failed notify).
@@ -1032,13 +1038,15 @@ export async function getDeliveryForReceiver(user, idOrPublicId) {
         idOrPublicId,
         user.id,
         contact.email,
-        contact.phone
+        contact.phone,
+        contact.altEmail
       )
     : await deliveryRepository.findDeliveryByPublicIdForReceiver(
         idOrPublicId,
         user.id,
         contact.email,
-        contact.phone
+        contact.phone,
+        contact.altEmail
       );
 
   if (!row) {

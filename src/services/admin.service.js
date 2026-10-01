@@ -621,13 +621,20 @@ export async function sendTestNotification(
     unreadCount,
   });
 
-  const push = await sendPushToUser(user.id, {
+  const { localizePushForUser } = await import('../i18n/notification_i18n.js');
+  const localized = await localizePushForUser(user.id, {
     title: titleFinal,
     body: bodyFinal,
+  });
+
+  const push = await sendPushToUser(user.id, {
+    title: localized.title,
+    body: localized.body,
     data: {
       type: 'admin_test',
       route: '/notifications',
       notificationId: notification.id,
+      language: localized.language,
     },
   });
 

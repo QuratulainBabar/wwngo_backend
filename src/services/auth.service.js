@@ -30,8 +30,30 @@ const USER_COLUMNS = `
   id, name, email, phone, country_code, bio, rating, review_count,
   wallet_balance, is_verified, kyc_status, account_status, created_at,
   email_verified, phone_verified, role, avatar_url, login_otp_verified_at,
-  is_admin
+  is_admin, preferred_language
 `;
+
+const ALLOWED_LANGUAGES = [
+  'en',
+  'fr',
+  'es',
+  'it',
+  'nl',
+  'de',
+  'ar',
+  'hi',
+  'zh',
+  'tr',
+  'ru',
+];
+
+function normalizePreferredLanguage(code) {
+  const raw = String(code || 'en')
+    .trim()
+    .toLowerCase()
+    .split(/[_-]/)[0];
+  return ALLOWED_LANGUAGES.includes(raw) ? raw : 'en';
+}
 
 const ALLOWED_ROLES = ['sender', 'traveler', 'receiver'];
 
@@ -86,6 +108,7 @@ function mapUser(row) {
     phoneVerified: Boolean(row.phone_verified),
     role: row.role ?? null,
     avatarUrl: row.avatar_url || null,
+    preferredLanguage: normalizePreferredLanguage(row.preferred_language),
     memberSince: createdAt.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
     createdAt: row.created_at,
   };
@@ -1234,10 +1257,25 @@ export async function deleteUserAvatar(userId) {
   return { user: mapUser(updated), avatarUrl: null };
 }
 
-export async function registerFcmToken(userId, { token, platform }) {
+export async function registerFcmToken(userId, { token, platform, preferredLanguage }) {
   const fcm = await import('./fcm.service.js');
   await fcm.registerDeviceToken(userId, { token, platform });
+  if (preferredLanguage != null && String(preferredLanguage).trim() !== '') {
+    await updatePreferredLanguage(userId, preferredLanguage);
+  }
   return { message: 'Device token registered' };
+}
+
+export async function updatePreferredLanguage(userId, preferredLanguage) {
+  const language = normalizePreferredLanguage(preferredLanguage);
+  await pool.query(
+    `UPDATE users
+     SET preferred_language = $2, updated_at = NOW()
+     WHERE id = $1`,
+    [userId, language]
+  );
+  const updated = await findUserById(userId);
+  return { user: mapUser(updated), preferredLanguage: language };
 }
 
 export async function getSecurityLogs(userId) {

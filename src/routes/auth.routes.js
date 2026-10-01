@@ -159,6 +159,14 @@ router.post(
   authController.registerFcmToken
 );
 
+router.patch(
+  '/preferred-language',
+  authenticate,
+  authController.updatePreferredLanguageValidators,
+  validate,
+  authController.updatePreferredLanguage
+);
+
 router.get('/security-logs', authenticate, authController.getSecurityLogs);
 
 export default router;

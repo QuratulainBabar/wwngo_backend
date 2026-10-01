@@ -112,9 +112,9 @@ async function loadSenderDelivery(senderId, idOrPublicId) {
  * Returns travelers whose trip To matches the delivery To (same destination
  * route) and whose luggage capacity covers the parcel weight.
  * Count is dynamic: every open trip that matches is returned (1, 2, 3, …).
- * Eligibility matches notifyMatchingSendersForNewTrip exactly — no travel-date
- * browse window (destination + luggage only) so notification badges and the
- * Matching Travelers list cannot diverge.
+ * Eligibility matches notifyMatchingSendersForNewTrip: destination + luggage,
+ * within the delivery-relative travel-date window (delivery − 5 days through
+ * delivery + 7 days inclusive).
  * City-to-city compares to_city labels (including city-head forms like
  * "Paris, France" ↔ "Paris, Île-de-France, France");
  * country-to-country air compares country codes/names (including aliases like
@@ -149,6 +149,7 @@ export async function listMatchingTravelersForDelivery(senderId, idOrPublicId) {
     destinationCode: dest.code,
     destinationCityHint,
     excludeTravelerId: senderId,
+    deliveryTravelDate: delivery.travel_date,
     limit: 100,
   });
 

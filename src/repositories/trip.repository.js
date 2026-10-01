@@ -1,5 +1,8 @@
 import { pool } from '../db/pool.js';
-import { TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL } from '../utils/trip_dates.js';
+import {
+  TRIP_TRAVEL_DATE_IN_ACTIVE_WINDOW_SQL,
+  matchingTripTravelDateBounds,
+} from '../utils/trip_dates.js';
 
 export async function createTrip(trip) {
   const { rows } = await pool.query(
@@ -323,10 +326,9 @@ export async function findDiscoverableTripByPublicId(publicId) {
  * Open trips that may match a delivery destination (broad SQL prefilter).
  * Final destination equality + luggage are enforced in matching.service.js.
  *
- * No travel-date window here — must stay identical to notifyMatchingSenders
- * (destination + luggage only). Browse windows belong on discover/list UIs,
- * not on match eligibility; otherwise notifications fire while the sender list
- * stays empty for trips outside today±N days.
+ * Matching travel-date window is relative to the delivery travel date:
+ * delivery − 5 days through delivery + 7 days (inclusive). Discover browse
+ * still uses the today-relative window separately.
  *
  * City-to-city: prefilter by to_city label only (to_code is country ISO, not a city key).
  * Country-to-country: prefilter by destination_country_code (case-insensitive) OR country label.
@@ -337,6 +339,7 @@ export async function listOpenTripsForDestinationMatch({
   destinationCode,
   destinationCityHint,
   excludeTravelerId,
+  deliveryTravelDate,
   limit = 100,
 } = {}) {
   const label = String(destinationLabel ?? '').trim().toLowerCase();
@@ -352,6 +355,7 @@ export async function listOpenTripsForDestinationMatch({
     .toLowerCase()
     .split(',')[0]
     .trim();
+  const { startDate, endDate } = matchingTripTravelDateBounds(deliveryTravelDate);
 
   const { rows } = await pool.query(
     `SELECT t.*,
@@ -362,6 +366,8 @@ export async function listOpenTripsForDestinationMatch({
      FROM trips t
      INNER JOIN users u ON u.id = t.traveler_id
      WHERE t.status = 'open_bid'
+       AND t.travel_date >= $8::date
+       AND t.travel_date <= $9::date
        AND ($2::uuid IS NULL OR t.traveler_id <> $2::uuid)
        AND (
          (
@@ -457,6 +463,8 @@ export async function listOpenTripsForDestinationMatch({
       searchLabel,
       limit,
       cityHint,
+      startDate,
+      endDate,
     ]
   );
   return rows;
